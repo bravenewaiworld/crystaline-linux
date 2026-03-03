@@ -66,6 +66,7 @@ int exfat_ent_set(struct super_block *sb, unsigned int loc,
 	sector_t sec;
 	__le32 *fat_entry;
 	struct buffer_head *bh;
+	int err;
 
 	sec = FAT_ENT_OFFSET_SECTOR(sb, loc);
 	off = FAT_ENT_OFFSET_BYTE_IN_SECTOR(sb, loc);
@@ -76,10 +77,11 @@ int exfat_ent_set(struct super_block *sb, unsigned int loc,
 
 	fat_entry = (__le32 *)&(bh->b_data[off]);
 	*fat_entry = cpu_to_le32(content);
-	exfat_update_bh(bh, sb->s_flags & SB_SYNCHRONOUS);
-	exfat_mirror_bh(sb, sec, bh);
+	err = exfat_update_bh(bh, sb->s_flags & SB_SYNCHRONOUS);
+	if (!err)
+		err = exfat_mirror_bh(sb, sec, bh);
 	brelse(bh);
-	return 0;
+	return err;
 }
 
 int exfat_ent_get(struct super_block *sb, unsigned int loc,
