@@ -878,9 +878,10 @@ static int exfat_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 
 	i_pos = exfat_make_i_pos(&info);
 	inode = exfat_build_inode(sb, &info, i_pos);
-	err = PTR_ERR_OR_ZERO(inode);
-	if (err)
+	if (IS_ERR(inode)) {
+		err = PTR_ERR(inode);
 		goto unlock;
+	}
 
 	inode_inc_iversion(inode);
 	EXFAT_I(inode)->i_crtime = simple_inode_init_ts(inode);
