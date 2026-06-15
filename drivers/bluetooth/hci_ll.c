@@ -370,7 +370,7 @@ static inline int ll_check_data_len(struct hci_dev *hdev, struct ll_struct *ll, 
 }
 
 /* Recv data */
-static int ll_recv(struct hci_uart *hu, const void *data, int count)
+static int ll_recv(struct hci_uart *hu, void *data, int count)
 {
 	struct ll_struct *ll = hu->priv;
 	const char *ptr;
