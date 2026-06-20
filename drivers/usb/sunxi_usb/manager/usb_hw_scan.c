@@ -188,12 +188,28 @@ static u32 get_detect_vbus_state(struct usb_scan_info *info)
 			else
 				det_vbus_state = USB_DET_VBUS_INVALID;
 #elif defined(CONFIG_POWER_SUPPLY)
-			power_supply_get_property(info->cfg->port.psy,
-					POWER_SUPPLY_PROP_ONLINE, &temp);
-			if (temp.intval)
-				det_vbus_state = USB_DET_VBUS_VALID;
-			else
-				det_vbus_state = USB_DET_VBUS_INVALID;
+			/*
+			 * port.psy is NULL/ERR when the det_vbus_supply
+			 * provider (AXP power-supply class device) is not
+			 * registered yet at usb_hw_scan_init() time, or when
+			 * the det_vbus_supply phandle is absent from the DT.
+			 * usb_hw_scan_init() only DMSG_INFO-warns in that case
+			 * but still arms vbus_id_hw_scan, so the scan thread
+			 * used to dereference a NULL psy here and Oops in
+			 * power_supply_get_property. Guard the use (and honour
+			 * the get_property return value, which the vendor code
+			 * ignored) and fall back to the last known vbus state.
+			 */
+			if (info->cfg->port.psy && !IS_ERR(info->cfg->port.psy) &&
+				!power_supply_get_property(info->cfg->port.psy,
+					POWER_SUPPLY_PROP_ONLINE, &temp)) {
+				if (temp.intval)
+					det_vbus_state = USB_DET_VBUS_VALID;
+				else
+					det_vbus_state = USB_DET_VBUS_INVALID;
+			} else {
+				det_vbus_state = info->det_vbus_old_state;
+			}
 #endif
 		} else {
 			det_vbus_state = info->det_vbus_old_state;
