@@ -178,6 +178,13 @@ static int sunxi_wlan_on(struct sunxi_wlan_platdata *data, bool on_off)
 				data->wlan_power[i] = regulator_get(dev,
 					data->wlan_power_name[i]);
 			}
+			if (IS_ERR(data->wlan_power[i])) {
+				ret = PTR_ERR(data->wlan_power[i]);
+				dev_err(dev, "regulator wlan_power %s get failed: %d\n",
+					data->wlan_power_name[i], ret);
+				data->wlan_power[i] = NULL;
+				return ret;
+			}
 			if (!IS_ERR(data->wlan_power[i])) {
 				if (on_off) {
 					ret =
@@ -222,6 +229,13 @@ static int sunxi_wlan_on(struct sunxi_wlan_platdata *data, bool on_off)
 		if (!data->io_regulator) {
 			data->io_regulator = regulator_get(dev,
 					data->io_regulator_name);
+		}
+		if (IS_ERR(data->io_regulator)) {
+			ret = PTR_ERR(data->io_regulator);
+			dev_err(dev, "regulator io_regulator %s get failed: %d\n",
+				data->io_regulator_name, ret);
+			data->io_regulator = NULL;
+			return ret;
 		}
 		if (!IS_ERR(data->io_regulator)) {
 			if (on_off) {
