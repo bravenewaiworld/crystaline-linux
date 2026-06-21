@@ -631,7 +631,7 @@ char *yytext;
 #include "srcpos.h"
 #include "dtc-parser.tab.h"
 
-YYLTYPE yylloc;
+extern YYLTYPE yylloc;
 extern bool treesource_error;
 
 /* CAUTION: this will stop working if we ever use yyless() or yyunput() */
@@ -2252,4 +2252,3 @@ static void lexical_error(const char *fmt, ...)
 
 	treesource_error = true;
 }
-
