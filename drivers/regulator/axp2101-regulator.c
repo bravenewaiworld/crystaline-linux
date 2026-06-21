@@ -809,19 +809,19 @@ static const struct regulator_desc axp2202_regulators[] = {
 	AXP_DESC(AXP2202, BLDO3, "bldo3", "bldo", 500, 3500, 100,
 		 AXP2202_BLDO3_CFG, GENMASK(4, 0), AXP2202_LDO_EN_CFG0,
 		 BIT(6)),
-	AXP_DESC(AXP2202, BLDO4, "bldo4", "bldo", 500, 1400, 50,
+	AXP_DESC(AXP2202, BLDO4, "bldo4", "bldo", 500, 3500, 100,
 		 AXP2202_BLDO4_CFG, GENMASK(4, 0), AXP2202_LDO_EN_CFG0,
 		 BIT(7)),
-	AXP_DESC(AXP2202, CLDO1, "cldo1", "cldo", 500, 1400, 50,
+	AXP_DESC(AXP2202, CLDO1, "cldo1", "cldo", 500, 3500, 100,
 		 AXP2202_CLDO1_CFG, GENMASK(4, 0), AXP2202_LDO_EN_CFG1,
 		 BIT(0)),
-	AXP_DESC(AXP2202, CLDO2, "cldo2", "cldo", 500, 1400, 50,
+	AXP_DESC(AXP2202, CLDO2, "cldo2", "cldo", 500, 3500, 100,
 		 AXP2202_CLDO2_CFG, GENMASK(4, 0), AXP2202_LDO_EN_CFG1,
 		 BIT(1)),
-	AXP_DESC(AXP2202, CLDO3, "cldo3", "cldo", 500, 1400, 50,
+	AXP_DESC(AXP2202, CLDO3, "cldo3", "cldo", 500, 3500, 100,
 		 AXP2202_CLDO3_CFG, GENMASK(4, 0), AXP2202_LDO_EN_CFG1,
 		 BIT(2)),
-	AXP_DESC(AXP2202, CLDO4, "cldo4", "cldo", 500, 1400, 50,
+	AXP_DESC(AXP2202, CLDO4, "cldo4", "cldo", 500, 3500, 100,
 		 AXP2202_CLDO4_CFG, GENMASK(4, 0), AXP2202_LDO_EN_CFG1,
 		 BIT(3)),
 };
@@ -880,6 +880,12 @@ static int axp20x_set_dcdc_freq(struct platform_device *pdev, u32 dcdcfreq)
 		def = 3000;
 		step = 150;
 		break;
+	case AXP2202_ID:
+		/* AXP2202 uses a different DCDC frequency control layout in this
+		 * BSP. Frequency programming is optional, so leave bootloader PMIC
+		 * settings intact instead of failing regulator probe.
+		 */
+		return 0;
 	default:
 		dev_err(&pdev->dev,
 			"Setting DCDC frequency for unsupported AXP variant\n");
