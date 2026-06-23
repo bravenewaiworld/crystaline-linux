@@ -18,6 +18,7 @@
 #include <linux/vmalloc.h>
 #include <linux/random.h>
 #include <linux/sched.h>
+#include <linux/sunxi-sid.h>
 #include <net/mac80211.h>
 #include <linux/platform_device.h>
 
@@ -457,11 +458,63 @@ static int xradio_macaddr_char2val(u8 *v_mac, const char *c_mac)
 
 /*bit0: 1=multicast, 0=unicast*/
 /*bit1: 1=locally, 0=universally(vendor use)*/
+/* A MAC is valid here if it is non-zero and unicast.  We accept
+ * locally-administered addresses (bit1 set) as well as universal ones, because
+ * the chip-id-derived address below is, correctly, locally administered. */
 #define MACADDR_VAILID(a) ( \
 (a[0] != 0 || a[1] != 0 ||  \
  a[2] != 0 || a[3] != 0 ||  \
  a[4] != 0 || a[5] != 0) && \
- !(a[0] & 0x3))
+ !(a[0] & 0x1))
+
+/* Derive a stable, per-device MAC address from the SoC chip-id efuse.
+ *
+ * The xr829 part has no built-in MAC, so the vendor driver generated a fresh
+ * random address on every boot when neither the macaddr= module param nor
+ * /etc/wifi/xr_wifi.conf supplied one.  On the PocketForge Debian rootfs that
+ * file is absent and not writable from this load context, so wlan0's MAC
+ * changed on every boot — breaking DHCP reservations and 802.11r PMK caching.
+ *
+ * Instead, fold the 128-bit SoC chip-id (unique per device, read from the SID
+ * efuse via the always-built-in sunxi-sid driver) into a locally-administered
+ * unicast MAC.  This is deterministic across reboots and reflashes and unique
+ * per device.  We use a self-contained FNV-1a mix rather than the crypto/md5
+ * path the in-tree GMAC driver uses, to avoid a runtime dependency on
+ * CONFIG_CRYPTO_MD5 (not enabled in our defconfig); MAC derivation needs no
+ * cryptographic properties, only good diffusion of the per-device entropy.
+ *
+ * Returns 0 and fills macaddr[ETH_ALEN] on success, <0 on failure.
+ */
+static int xradio_chipid_macaddr(u8 *macaddr)
+{
+	u8 chipid[16];
+	u64 h = 0xcbf29ce484222325ULL; /* FNV-1a 64-bit offset basis */
+	int i, ret;
+
+	ret = sunxi_get_soc_chipid(chipid);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < (int)sizeof(chipid); i++) {
+		h ^= chipid[i];
+		h *= 0x100000001b3ULL; /* FNV-1a 64-bit prime */
+	}
+	/* Salt so the WiFi MAC never collides with the wired GMAC's
+	 * chip-id-derived MAC (geth_chip_hwaddr() hashes the same chip-id). */
+	h ^= 'W';
+	h *= 0x100000001b3ULL;
+
+	macaddr[0] = (h >> 40) & 0xff;
+	macaddr[1] = (h >> 32) & 0xff;
+	macaddr[2] = (h >> 24) & 0xff;
+	macaddr[3] = (h >> 16) & 0xff;
+	macaddr[4] = (h >>  8) & 0xff;
+	macaddr[5] =  h        & 0xff;
+	macaddr[0] &= 0xFE; /* clear multicast bit */
+	macaddr[0] |= 0x02; /* set locally-administered bit (IEEE 802) */
+
+	return 0;
+}
 
 static void xradio_get_mac_addrs(u8 *macaddr)
 {
@@ -489,24 +542,30 @@ static void xradio_get_mac_addrs(u8 *macaddr)
 		}
 #endif
 		if (ret < 0 || !MACADDR_VAILID(macaddr)) {
-			get_random_bytes(macaddr, 6);
-			macaddr[0] &= 0xFC;
-#ifdef XRADIO_MACPARAM_HEX
-			ret = access_file(WIFI_CONF_PATH, macaddr, ETH_ALEN, 0);
-#else
-			ret = xradio_macaddr_val2char(c_mac, macaddr);
-			ret = access_file(WIFI_CONF_PATH, c_mac, ret, 0);
-#endif
-			if (ret < 0)
-				xradio_dbg(XRADIO_DBG_ERROR, "Access_file failed, path:%s!\n",
-					   WIFI_CONF_PATH);
+			/* No macaddr= param and no valid value in the wifi conf
+			 * file: derive a STABLE, per-device MAC from the SoC
+			 * chip-id efuse.  Deterministic across reboots and
+			 * reflashes and unique per device, unlike the old
+			 * get_random_bytes() path which produced a new MAC on
+			 * every boot. */
+			ret = xradio_chipid_macaddr(macaddr);
+			if (ret < 0 || !MACADDR_VAILID(macaddr)) {
+				/* Chip-id read failed (should not happen on
+				 * A133): fall back to a random locally-
+				 * administered MAC so WiFi still comes up. */
+				get_random_bytes(macaddr, 6);
+				macaddr[0] &= 0xFE; /* clear multicast bit */
+				macaddr[0] |= 0x02; /* locally administered */
+				xradio_dbg(XRADIO_DBG_WARN,
+					   "chipid MAC failed, using random!\n");
+			}
 			if (!MACADDR_VAILID(macaddr)) {
 				xradio_dbg(XRADIO_DBG_WARN, "Use default Mac addr!\n");
 				macaddr[0] = 0xDC;
 				macaddr[1] = 0x44;
 				macaddr[2] = 0x6D;
 			} else {
-				xradio_dbg(XRADIO_DBG_NIY, "Use random Mac addr!\n");
+				xradio_dbg(XRADIO_DBG_NIY, "Use chipid Mac addr!\n");
 			}
 		} else {
 			xradio_dbg(XRADIO_DBG_NIY, "Use Mac addr in file!\n");
