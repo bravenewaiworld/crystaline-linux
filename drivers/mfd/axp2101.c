@@ -2292,12 +2292,13 @@ static struct mfd_cell axp2202_cells[] = {
 		.of_compatible = "x-powers,axp2202-gpio",
 	},
 	{
-		.name = "axp2202-regulator",
-		.of_compatible = "x-powers,axp2202-regulator",
+		/* match drivers/regulator/axp2101-regulator.c; its DT node has no compatible */
+		.name = "axp2101-regulator",
 	},
 	{
-		.name = "axp2202-pek",
-		.of_compatible = "x-powers,axp2202-pek",
+		/* match drivers/input/misc/axp2101-pek.c and the vendor DT's powerkey node */
+		.name = "axp2101-pek",
+		.of_compatible = "x-powers,axp2101-pek",
 		.resources = axp2202_pek_resources,
 		.num_resources = ARRAY_SIZE(axp2202_pek_resources),
 
