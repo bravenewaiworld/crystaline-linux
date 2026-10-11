@@ -850,6 +850,54 @@ static const struct regulator_desc axp2585_drivevbus_regulator = {
 	.ops		= &axp20x_ops_sw,
 };
 
+/*
+ * USB VBUS output for OTG host mode: the boost converter (AXP2202_MODULE_EN bit 4) and the
+ * switch that connects it to VBUS (AXP2202_RBFET_CTRL bit 0). Both are needed; TrimUI's kernel
+ * sets them the same way.
+ */
+static int axp2202_drivevbus_set(struct regulator_dev *rdev, bool on)
+{
+	int ret = regmap_update_bits(rdev->regmap, AXP2202_RBFET_CTRL, BIT(0),
+				     on ? BIT(0) : 0);
+
+	return ret ?: regmap_update_bits(rdev->regmap, AXP2202_MODULE_EN, BIT(4),
+					 on ? BIT(4) : 0);
+}
+
+static int axp2202_drivevbus_enable(struct regulator_dev *rdev)
+{
+	return axp2202_drivevbus_set(rdev, true);
+}
+
+static int axp2202_drivevbus_disable(struct regulator_dev *rdev)
+{
+	return axp2202_drivevbus_set(rdev, false);
+}
+
+static int axp2202_drivevbus_is_enabled(struct regulator_dev *rdev)
+{
+	unsigned int rbfet, module;
+	int ret = regmap_read(rdev->regmap, AXP2202_RBFET_CTRL, &rbfet) ?:
+		  regmap_read(rdev->regmap, AXP2202_MODULE_EN, &module);
+
+	return ret ?: (rbfet & BIT(0)) && (module & BIT(4));
+}
+
+static const struct regulator_ops axp2202_drivevbus_ops = {
+	.enable		= axp2202_drivevbus_enable,
+	.disable	= axp2202_drivevbus_disable,
+	.is_enabled	= axp2202_drivevbus_is_enabled,
+};
+
+static const struct regulator_desc axp2202_drivevbus_regulator = {
+	.name		= "drivevbus",
+	.of_match	= of_match_ptr("drivevbus"),
+	.regulators_node = of_match_ptr("regulators"),
+	.type		= REGULATOR_VOLTAGE,
+	.owner		= THIS_MODULE,
+	.ops		= &axp2202_drivevbus_ops,
+};
+
 static int axp20x_set_dcdc_freq(struct platform_device *pdev, u32 dcdcfreq)
 {
 	struct axp20x_dev *axp20x = dev_get_drvdata(pdev->dev.parent);
@@ -1089,6 +1137,8 @@ static int axp2101_regulator_probe(struct platform_device *pdev)
 	case AXP2202_ID:
 		regulators = axp2202_regulators;
 		nregulators = AXP2202_REG_ID_MAX;
+		drivevbus = of_property_read_bool(pdev->dev.parent->of_node,
+						  "x-powers,drive-vbus-en");
 		break;
 	default:
 		dev_err(&pdev->dev, "Unsupported AXP variant: %ld\n",
@@ -1207,6 +1257,11 @@ static int axp2101_regulator_probe(struct platform_device *pdev)
 		case AXP2585_ID:
 			rdev = devm_regulator_register(&pdev->dev,
 						       &axp2585_drivevbus_regulator,
+						       &config);
+			break;
+		case AXP2202_ID:
+			rdev = devm_regulator_register(&pdev->dev,
+						       &axp2202_drivevbus_regulator,
 						       &config);
 			break;
 		default:

@@ -31,6 +31,7 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/of_gpio.h>
+#include <linux/extcon.h>
 
 #include  "../include/sunxi_usb_config.h"
 #include  "usb_manager.h"
@@ -307,6 +308,61 @@ static __s32 usb_script_parse(struct device_node *np, struct usb_cfg *cfg)
 	return 0;
 }
 
+/*
+ * Port role from cable detection (extcon) instead of the scan thread, for boards whose role
+ * comes from a USB-C detector rather than an ID pin: usbc0's "extcon" property names the
+ * detector. The port is host while EXTCON_USB_HOST is attached, device while EXTCON_USB is,
+ * and off otherwise.
+ */
+static struct extcon_dev *usb_edev;
+static struct notifier_block usb_extcon_nb[2];	/* one per cable: a block joins one chain */
+static struct work_struct usb_extcon_work;
+
+static void usb_extcon_work_fn(struct work_struct *work)
+{
+	enum usb_role role = USB_ROLE_NULL;
+
+	if (extcon_get_state(usb_edev, EXTCON_USB_HOST) > 0)
+		role = USB_ROLE_HOST;
+	else if (extcon_get_state(usb_edev, EXTCON_USB) > 0)
+		role = USB_ROLE_DEVICE;
+	if (role == get_usb_role())
+		return;
+
+	hw_rmmod_usb_host();
+	hw_rmmod_usb_device();
+	usb_msg_center(&g_usb_cfg);
+	if (role == USB_ROLE_HOST)
+		hw_insmod_usb_host();
+	else if (role == USB_ROLE_DEVICE)
+		hw_insmod_usb_device();
+	usb_msg_center(&g_usb_cfg);
+}
+
+static int usb_extcon_event(struct notifier_block *nb, unsigned long event, void *ptr)
+{
+	schedule_work(&usb_extcon_work);
+	return NOTIFY_DONE;
+}
+
+static int usb_extcon_init(struct device *dev)
+{
+	static const unsigned int cables[] = { EXTCON_USB, EXTCON_USB_HOST };
+	int i, ret;
+
+	INIT_WORK(&usb_extcon_work, usb_extcon_work_fn);
+	for (i = 0; i < ARRAY_SIZE(cables); i++) {
+		usb_extcon_nb[i].notifier_call = usb_extcon_event;
+		ret = devm_extcon_register_notifier(dev, usb_edev, cables[i],
+						    &usb_extcon_nb[i]);
+		if (ret)
+			return ret;
+	}
+	schedule_work(&usb_extcon_work);	/* the cables' state at boot */
+	return 0;
+}
+
+/* 1 if the port must not power VBUS (no host cable, or the ID pin is high), 0 if it may. */
 int usb_otg_id_status(void)
 {
 	struct usb_cfg *cfg = NULL;
@@ -315,6 +371,9 @@ int usb_otg_id_status(void)
 	cfg = &g_usb_cfg;
 	if (cfg == NULL)
 		return -1;
+
+	if (usb_edev)
+		return extcon_get_state(usb_edev, EXTCON_USB_HOST) > 0 ? 0 : 1;
 
 	if (cfg->port.port_type == USB_PORT_TYPE_DEVICE)
 		return 1;
@@ -337,6 +396,16 @@ static int sunxi_otg_manager_probe(struct platform_device *pdev)
 	struct task_struct *th = NULL;
 	struct task_struct *id_irq_th = NULL;
 	int ret = -1;
+
+	if (of_find_property(np, "extcon", NULL)) {
+		/* before anything else, as the detector may not be ready yet (-EPROBE_DEFER) */
+		usb_edev = extcon_get_edev_by_phandle(&pdev->dev, 0);
+		if (IS_ERR(usb_edev)) {
+			ret = PTR_ERR(usb_edev);
+			usb_edev = NULL;
+			return ret;
+		}
+	}
 
 	memset(&g_usb_cfg, 0, sizeof(struct usb_cfg));
 	g_usb_cfg.usb_global_enable = 1;
@@ -385,7 +454,11 @@ static int sunxi_otg_manager_probe(struct platform_device *pdev)
 		wake_up_process(host_th);
 	}
 
-	if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG) {
+	if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG && usb_edev) {
+		ret = usb_extcon_init(&pdev->dev);
+		if (ret)
+			return ret;
+	} else if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG) {
 		usb_hw_scan_init(&g_usb_cfg);
 
 		if (g_usb_cfg.port.detect_mode == USB_DETECT_MODE_THREAD) {
@@ -449,7 +522,9 @@ static int sunxi_otg_manager_remove(struct platform_device *pdev)
 	}
 
 	remove_node_file(pdev);
-	if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG) {
+	if (usb_edev)
+		cancel_work_sync(&usb_extcon_work);
+	else if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG) {
 		thread_run_flag = 0;
 		while (!thread_stopped_flag) {
 			DMSG_INFO("waitting for usb_hardware_scan_thread stop\n");

@@ -1253,6 +1253,9 @@ static struct resource axp2202_bat_power_supply_resources[] = {
 static struct resource axp2202_usb_power_supply_resources[] = {
 	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VINSERT, "vbus_insert"),
 	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VREMOVE, "vbus_remove"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CINSERT, "cable_insert"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CREMOVE, "cable_remove"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BC_DONE, "bc_done"),
 };
 
 static struct resource axp2585_pek_resources[] = {

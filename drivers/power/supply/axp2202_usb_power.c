@@ -2,11 +2,18 @@
 /*
  * X-Powers AXP2202 USB (VBUS) power supply driver.
  *
+ * Also reports the USB cable state as extcon cables, for the USB port's role switching:
+ * EXTCON_USB while powered by a computer or charger, EXTCON_USB_HOST while a USB device that
+ * needs power is attached (from the chip's USB-C detection), and the charger type found by the
+ * chip's BC1.2 detection (EXTCON_CHG_USB_*), which also sets the input current limit itself.
+ *
  * Based on Allwinner's BSP driver (github.com/radxa/allwinner-bsp).
  * Copyright(c) 2020 - 2023 Allwinner Technology Co.,Ltd. All rights reserved.
  */
 
+#include <linux/bitfield.h>
 #include <linux/delay.h>
+#include <linux/extcon.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/mfd/axp2101.h>
@@ -23,11 +30,31 @@ static const struct {
 } axp2202_usb_irqs[] = {
 	{ "vbus_insert", "wakeup_usb_in" },
 	{ "vbus_remove", "wakeup_usb_out" },
+	{ "cable_insert", "wakeup_typec_in" },	/* USB-C attach and detach */
+	{ "cable_remove", "wakeup_typec_out" },
+	{ "bc_done", "wakeup_bc_done" },	/* BC1.2 charger detection finished */
 };
+
+static const unsigned int axp2202_usb_cables[] = {
+	EXTCON_USB,
+	EXTCON_USB_HOST,
+	EXTCON_CHG_USB_SDP,
+	EXTCON_CHG_USB_CDP,
+	EXTCON_CHG_USB_DCP,
+	EXTCON_NONE,
+};
+
+/* USB-C state (AXP2202_CC_STAT0 bits 3:0), the standard USB-C state machine's attached states */
+#define AXP2202_CC_STATE		GENMASK(3, 0)
+#define AXP2202_CC_ATTACHED_SINK	3	/* powered by the other end */
+#define AXP2202_CC_ATTACHED_SOURCE	6	/* the other end needs power */
+/* BC1.2 result (AXP2202_BC_DECT bits 7:5): 1 SDP, 2 CDP, 3 DCP, as mainline's axp20x drivers */
+#define AXP2202_BC_RESULT		GENMASK(7, 5)
 
 struct axp2202_usb_power {
 	struct regmap *regmap;
 	struct power_supply *usb_supply;
+	struct extcon_dev *edev;
 	/* virqs to disable during suspend, 0 for the others */
 	int sleep_irqs[ARRAY_SIZE(axp2202_usb_irqs)];
 };
@@ -124,16 +151,40 @@ static const struct power_supply_desc axp2202_usb_desc = {
 	.num_properties = ARRAY_SIZE(axp2202_usb_props),
 };
 
+/* Read the cable state from the chip and report changes. */
+static void axp2202_usb_update(struct axp2202_usb_power *usb_power)
+{
+	static const unsigned int chargers[] = {
+		EXTCON_CHG_USB_SDP, EXTCON_CHG_USB_CDP, EXTCON_CHG_USB_DCP,
+	};
+	unsigned int stat, cc, bc;
+	bool vbus, host;
+	int i;
+
+	if (regmap_read(usb_power->regmap, AXP2202_COMM_STAT0, &stat) ||
+	    regmap_read(usb_power->regmap, AXP2202_CC_STAT0, &cc) ||
+	    regmap_read(usb_power->regmap, AXP2202_BC_DECT, &bc))
+		return;
+	host = (cc & AXP2202_CC_STATE) == AXP2202_CC_ATTACHED_SOURCE;
+	/* while host, VBUS is our own output */
+	vbus = (stat & AXP2202_VBUS_GOOD) && !host;
+	bc = vbus ? FIELD_GET(AXP2202_BC_RESULT, bc) : 0;
+
+	extcon_set_state_sync(usb_power->edev, EXTCON_USB_HOST, host);
+	extcon_set_state_sync(usb_power->edev, EXTCON_USB, vbus);
+	for (i = 0; i < ARRAY_SIZE(chargers); i++)
+		extcon_set_state_sync(usb_power->edev, chargers[i], bc == i + 1);
+	power_supply_changed(usb_power->usb_supply);
+}
+
 static irqreturn_t axp2202_usb_irq(int irq, void *data)
 {
-	struct axp2202_usb_power *usb_power = data;
-
 	/*
 	 * Runs in a thread (nested regmap-irq), so it may sleep. Let VBUS
 	 * settle before reporting the change.
 	 */
 	msleep(20);
-	power_supply_changed(usb_power->usb_supply);
+	axp2202_usb_update(data);
 
 	return IRQ_HANDLED;
 }
@@ -151,6 +202,9 @@ static void axp2202_usb_init(struct axp2202_usb_power *usb_power,
 		bc12_en = 0;
 	if (of_property_read_u32(np, "pmu_boost_vol", &boost_mv))
 		boost_mv = 5126;
+
+	/* the VBUS voltage reading (AXP2202_VBUS_H) needs its ADC channel */
+	regmap_update_bits(regmap, AXP2202_ADC_CH_EN0, BIT(2), BIT(2));
 
 	vindpm_mv = clamp(vindpm_mv, 3880U, 5080U);
 	regmap_update_bits(regmap, AXP2202_VINDPM_CFG, GENMASK(3, 0),
@@ -211,6 +265,14 @@ static int axp2202_usb_probe(struct platform_device *pdev)
 		return PTR_ERR(usb_power->usb_supply);
 	}
 
+	usb_power->edev = devm_extcon_dev_allocate(&pdev->dev, axp2202_usb_cables);
+	if (IS_ERR(usb_power->edev))
+		return PTR_ERR(usb_power->edev);
+	ret = devm_extcon_dev_register(&pdev->dev, usb_power->edev);
+	if (ret)
+		return ret;
+	axp2202_usb_update(usb_power);
+
 	for (i = 0; i < ARRAY_SIZE(axp2202_usb_irqs); i++) {
 		irq = platform_get_irq_byname(pdev, axp2202_usb_irqs[i].name);
 		if (irq < 0)
@@ -260,7 +322,10 @@ static int axp2202_usb_suspend(struct device *dev)
 
 static int axp2202_usb_resume(struct device *dev)
 {
-	axp2202_usb_set_irqs(dev_get_drvdata(dev), true);
+	struct axp2202_usb_power *usb_power = dev_get_drvdata(dev);
+
+	axp2202_usb_set_irqs(usb_power, true);
+	axp2202_usb_update(usb_power);	/* cables may have changed while asleep */
 	return 0;
 }
 #endif
