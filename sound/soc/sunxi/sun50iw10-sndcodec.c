@@ -80,6 +80,12 @@ struct sunxi_card_priv {
 	u32 key_hook;
 	u32 key_voiceassist;
 	u32 hp_detect_case;
+	/*
+	 * DT "noheadphonemic": the jack has no microphone contact, so anything plugged in is
+	 * headphones, and the codec's microphone/button detection is left off (it otherwise
+	 * triggers during playback and mutes the amplifiers).
+	 */
+	bool no_mic;
 #endif
 };
 
@@ -97,7 +103,7 @@ static int sunxi_check_jack_type(struct snd_soc_jack *jack)
 	tempdata = (reg_val >> HMIC_DATA) & 0x1f;
 
 	priv->headset_basedata = tempdata;
-	if (tempdata >= priv->HEADSET_DATA) {
+	if (tempdata >= priv->HEADSET_DATA && !priv->no_mic) {
 		pr_debug("[SND_JACK_HEADSET], priv->HEADSET_DATA:0x%x\n",
 		       priv->HEADSET_DATA);
 		/*
@@ -163,6 +169,15 @@ static void sunxi_check_hs_plug(struct work_struct *work)
 	mutex_unlock(&priv->jack_mlock);
 }
 
+/*
+ * Report plugging and unplugging through ASoC, which also switches the jack's DAPM pins (see
+ * sunxi_jack_pins). Not usable from the IRQ handler, which reports buttons with snd_jack_report().
+ */
+static void sunxi_report_plug(struct sunxi_card_priv *priv, int status)
+{
+	snd_soc_jack_report(&priv->jack, status, SND_JACK_HEADSET);
+}
+
 /* Checks jack insertion and identifies the jack type.*/
 static void sunxi_check_hs_detect_status(struct work_struct *work)
 {
@@ -179,7 +194,7 @@ static void sunxi_check_hs_detect_status(struct work_struct *work)
 		jack_type = sunxi_check_jack_type(&priv->jack);
 		if (jack_type != priv->switch_status) {
 			priv->switch_status = jack_type;
-			snd_jack_report(priv->jack.jack, jack_type);
+			sunxi_report_plug(priv, jack_type);
 			pr_err("plugin --> switch:%d\n", jack_type);
 			switch_state = jack_type;
 		}
@@ -216,7 +231,7 @@ static void sunxi_check_hs_detect_status(struct work_struct *work)
 	} else {
 		priv->switch_status = 0;
 		/*clear headset pulgout pending.*/
-		snd_jack_report(priv->jack.jack, priv->switch_status);
+		sunxi_report_plug(priv, priv->switch_status);
 		switch_state = priv->switch_status;
 		pr_err("plugout --> switch:%d\n", priv->switch_status);
 		priv->tv_headset_plugin.tv_sec = 0;
@@ -228,9 +243,10 @@ static void sunxi_check_hs_detect_status(struct work_struct *work)
 		snd_soc_update_bits(priv->codec, SUNXI_HMIC_CTRL,
 				(0x1f << MDATA_THRESHOLD),
 				(mdata_threshold << MDATA_THRESHOLD));
-		snd_soc_update_bits(priv->codec, SUNXI_HMIC_CTRL,
-				    (0x1 << MIC_DET_IRQ_EN),
-				    (0x1 << MIC_DET_IRQ_EN));
+		if (!priv->no_mic)
+			snd_soc_update_bits(priv->codec, SUNXI_HMIC_CTRL,
+					    (0x1 << MIC_DET_IRQ_EN),
+					    (0x1 << MIC_DET_IRQ_EN));
 	}
 	mutex_unlock(&priv->jack_mlock);
 }
@@ -254,7 +270,7 @@ static void sunxi_hs_init_work(struct work_struct *work)
 			 */
 			pr_debug("[codec-machine] resume-->report switch.\n");
 			priv->switch_status = 0;
-			snd_jack_report(priv->jack.jack, priv->switch_status);
+			sunxi_report_plug(priv, priv->switch_status);
 			switch_state = 0;
 		}
 	}
@@ -304,7 +320,7 @@ static irqreturn_t jack_interrupt(int irq, void *dev_id)
 
 	jack_state = snd_soc_read(priv->codec, SUNXI_HMIC_STS);
 
-	if (priv->detect_state != PLUG_IN) {
+	if (priv->detect_state != PLUG_IN && !priv->no_mic) {
 		if (jack_state & (1 << MIC_DET_ST)) {
 			regval = snd_soc_read(priv->codec, SUNXI_HMIC_CTRL);
 			regval &= ~(0x1 << MIC_DET_IRQ_EN);
@@ -357,7 +373,7 @@ static irqreturn_t jack_interrupt(int irq, void *dev_id)
 	}
 
 	/*key*/
-	if ((priv->detect_state == PLUG_IN) &&
+	if ((priv->detect_state == PLUG_IN) && !priv->no_mic &&
 		(jack_state & (1 << MIC_DET_ST))) {
 		regval = snd_soc_read(priv->codec, SUNXI_HMIC_STS);
 		regval &= ~(0x1 << JACK_DET_IIN_ST);
@@ -456,6 +472,12 @@ static irqreturn_t jack_interrupt(int irq, void *dev_id)
 }
 #endif
 
+/* Headphones in: headphone output on, speaker off; out: the reverse. */
+static struct snd_soc_jack_pin sunxi_jack_pins[] = {
+	{ .pin = "Headphone", .mask = SND_JACK_HEADPHONE },
+	{ .pin = "HpSpeaker", .mask = SND_JACK_HEADPHONE, .invert = 1 },
+};
+
 static const struct snd_kcontrol_new sunxi_card_controls[] = {
 	SOC_DAPM_PIN_SWITCH("Headphone"),
 	SOC_DAPM_PIN_SWITCH("HpSpeaker"),
@@ -500,14 +522,21 @@ static int sunxi_card_init(struct snd_soc_pcm_runtime *rtd)
 	snd_jack_set_key(priv->jack.jack, SND_JACK_BTN_1, KEY_VOLUMEUP);
 	snd_jack_set_key(priv->jack.jack, SND_JACK_BTN_2, KEY_VOLUMEDOWN);
 	snd_jack_set_key(priv->jack.jack, SND_JACK_BTN_3, KEY_VOICECOMMAND);
+
+	/* Sets the pins for "nothing plugged in" until the first detection. */
+	ret = snd_soc_jack_add_pins(&priv->jack, ARRAY_SIZE(sunxi_jack_pins),
+				    sunxi_jack_pins);
+	if (ret)
+		return ret;
+#else
+	snd_soc_dapm_disable_pin(dapm, "HpSpeaker");
+	snd_soc_dapm_disable_pin(dapm, "Headphone");
 #endif
 
 	snd_soc_dapm_disable_pin(dapm, "HPOUTR");
 	snd_soc_dapm_disable_pin(dapm, "HPOUTL");
 
 	snd_soc_dapm_disable_pin(dapm, "LINEOUT");
-	snd_soc_dapm_disable_pin(dapm, "HpSpeaker");
-	snd_soc_dapm_disable_pin(dapm, "Headphone");
 
 	snd_soc_dapm_sync(dapm);
 
@@ -651,9 +680,10 @@ static void sunxi_hs_reg_init(struct sunxi_card_priv *priv)
 			    (0x1 << HMICBIASEN), (0x1 << HMICBIASEN));
 	snd_soc_update_bits(priv->codec, SUNXI_MICBIAS_REG,
 			    (0x1 << MICADCEN), (0x1 << MICADCEN));
-	snd_soc_update_bits(priv->codec, SUNXI_HMIC_CTRL,
-				(0x1 << MIC_DET_IRQ_EN),
-				(0x1 << MIC_DET_IRQ_EN));
+	if (!priv->no_mic)
+		snd_soc_update_bits(priv->codec, SUNXI_HMIC_CTRL,
+				    (0x1 << MIC_DET_IRQ_EN),
+				    (0x1 << MIC_DET_IRQ_EN));
 
 	schedule_delayed_work(&priv->hs_init_work, msecs_to_jiffies(10));
 }
@@ -789,6 +819,7 @@ static int sunxi_card_dev_probe(struct platform_device *pdev)
 
 
 #ifdef CONFIG_SND_SUNXI_SOC_SUN50IW10_JACK
+	priv->no_mic = of_property_read_bool(np, "noheadphonemic");
 	ret = of_property_read_u32(np, "hp_detect_case", &temp_val);
 	if (ret < 0) {
 		pr_err("[audio] hp_detect_case  missing or invalid.\n");

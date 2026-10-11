@@ -60,6 +60,10 @@ static const struct sample_rate sample_rate_conv[] = {
 	{192000, 6},
 };
 
+/*
+ * "digital volume" and "Headphone Volume" are attenuations in hardware (register 0 = loudest), so
+ * their controls are inverted: higher values are louder, as the dB scales say.
+ */
 static const DECLARE_TLV_DB_SCALE(digital_tlv, -7424, 116, 0);
 static const DECLARE_TLV_DB_SCALE(headphone_gain_tlv, -4200, 600, 0);
 static const DECLARE_TLV_DB_SCALE(mic1gain_tlv, 0, 100, 0);
@@ -631,7 +635,11 @@ static int sunxi_codec_hpspeaker_event(struct snd_soc_dapm_widget *w,
 	return 0;
 }
 
-static int sunxi_codec_headphone_event(struct snd_soc_dapm_widget *w,
+/*
+ * The headphone amplifier. The speaker amplifier is fed from the headphone outputs, so this
+ * powers both the Headphone and HpSpeaker paths (see the "HP Amp" routes).
+ */
+static int sunxi_codec_hpamp_event(struct snd_soc_dapm_widget *w,
 			struct snd_kcontrol *k,	int event)
 {
 	struct snd_soc_codec *codec = snd_soc_dapm_to_codec(w->dapm);
@@ -822,7 +830,7 @@ static const struct snd_kcontrol_new sunxi_codec_controls[] = {
 				sunxi_codec_set_adcswap_mode),
 	/* Digital Volume */
 	SOC_SINGLE_TLV("digital volume", SUNXI_DAC_DPC,
-					DVOL, 0x3F, 0, digital_tlv),
+					DVOL, 0x3F, 1, digital_tlv),
 	/* MIC1 Gain */
 	SOC_SINGLE_TLV("MIC1 gain volume", SUNXI_ADCL_REG,
 					ADCL_PGA_GAIN_CTRL, 0x1F, 0, mic1gain_tlv),
@@ -840,7 +848,7 @@ static const struct snd_kcontrol_new sunxi_codec_controls[] = {
 		       0xFF, 0, adc_vol_tlv),
 	/* Headphone Gain */
 	SOC_SINGLE_TLV("Headphone Volume", SUNXI_DAC_REG, HEADPHONE_GAIN,
-			0x7, 0, headphone_gain_tlv),
+			0x7, 1, headphone_gain_tlv),
 };
 
 /* lineout controls */
@@ -908,7 +916,10 @@ static const struct snd_soc_dapm_widget sunxi_codec_dapm_widgets[] = {
 	SND_SOC_DAPM_OUTPUT("HPOUTL"),
 	SND_SOC_DAPM_OUTPUT("HPOUTR"),
 
-	SND_SOC_DAPM_HP("Headphone", sunxi_codec_headphone_event),
+	SND_SOC_DAPM_PGA_E("HP Amp", SND_SOC_NOPM, 0, 0, NULL, 0, sunxi_codec_hpamp_event,
+			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+
+	SND_SOC_DAPM_HP("Headphone", NULL),
 	SND_SOC_DAPM_LINE("LINEOUT", sunxi_codec_lineout_event),
 	SND_SOC_DAPM_SPK("HpSpeaker", sunxi_codec_hpspeaker_event),
 };
@@ -931,11 +942,11 @@ static const struct snd_soc_dapm_route sunxi_codec_dapm_routes[] = {
 	{"HPOUTL", NULL, "DACL"},
 	{"HPOUTR", NULL, "DACR"},
 
-	{"Headphone", NULL, "HPOUTL"},
-	{"Headphone", NULL, "HPOUTR"},
+	{"HP Amp", NULL, "HPOUTL"},
+	{"HP Amp", NULL, "HPOUTR"},
 
-	{"HpSpeaker", NULL, "HPOUTR"},
-	{"HpSpeaker", NULL, "HPOUTL"},
+	{"Headphone", NULL, "HP Amp"},
+	{"HpSpeaker", NULL, "HP Amp"},
 };
 
 static void sunxi_codec_init(struct snd_soc_codec *codec)
