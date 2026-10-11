@@ -851,9 +851,9 @@ static const struct regulator_desc axp2585_drivevbus_regulator = {
 };
 
 /*
- * USB VBUS output for OTG host mode: the boost converter (AXP2202_MODULE_EN bit 4) and the
- * switch that connects it to VBUS (AXP2202_RBFET_CTRL bit 0). Both are needed; TrimUI's kernel
- * sets them the same way.
+ * USB VBUS output for OTG host mode: the 5 V boost converter (AXP2202_MODULE_EN bit 4) and the
+ * switch from it to the VBUS pin (AXP2202_RBFET_CTRL bit 0). Both must be on for VBUS to get
+ * power (TrimUI's kernel sets them the same way).
  */
 static int axp2202_drivevbus_set(struct regulator_dev *rdev, bool on)
 {

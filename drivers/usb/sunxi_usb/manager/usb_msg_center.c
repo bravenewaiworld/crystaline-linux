@@ -172,7 +172,8 @@ static void insmod_device_driver(struct usb_msg_center_info *center_info)
 static void rmmod_device_driver(struct usb_msg_center_info *center_info)
 {
 #if !defined(CONFIG_AW_AXP) && defined(CONFIG_POWER_SUPPLY)
-	struct power_supply *psy = NULL;
+	/* looked up once: each lookup holds a reference until the device is removed */
+	static struct power_supply *psy;
 	union power_supply_propval temp;
 #endif
 
@@ -189,7 +190,8 @@ static void rmmod_device_driver(struct usb_msg_center_info *center_info)
 	axp_usbcur(CHARGE_AC);
 	axp_usbvol(CHARGE_AC);
 #elif defined(CONFIG_POWER_SUPPLY) && !defined(SUNXI_USB_FPGA)
-	if (of_find_property(center_info->cfg->pdev->dev.of_node, "det_vbus_supply", NULL))
+	if (IS_ERR_OR_NULL(psy) &&
+	    of_find_property(center_info->cfg->pdev->dev.of_node, "det_vbus_supply", NULL))
 		psy = devm_power_supply_get_by_phandle(&center_info->cfg->pdev->dev,
 						     "det_vbus_supply");
 

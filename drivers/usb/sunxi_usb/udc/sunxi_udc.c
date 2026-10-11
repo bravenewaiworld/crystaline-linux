@@ -392,7 +392,8 @@ static __u32 is_peripheral_active(void)
 void sunxi_set_cur_vol_work(struct work_struct *work)
 {
 #if !defined(CONFIG_AW_AXP) && defined(CONFIG_POWER_SUPPLY)
-	struct power_supply *psy = NULL;
+	/* looked up once: each lookup holds a reference until the device is removed */
+	static struct power_supply *psy;
 	union power_supply_propval temp;
 #endif
 
@@ -400,7 +401,8 @@ void sunxi_set_cur_vol_work(struct work_struct *work)
 		axp_usbvol(CHARGE_USB_20);
 		axp_usbcur(CHARGE_USB_20);
 #elif defined CONFIG_POWER_SUPPLY && !defined SUNXI_USB_FPGA
-	if (of_find_property(g_udc_pdev->dev.of_node, "det_vbus_supply", NULL))
+	if (IS_ERR_OR_NULL(psy) &&
+	    of_find_property(g_udc_pdev->dev.of_node, "det_vbus_supply", NULL))
 		psy = devm_power_supply_get_by_phandle(&g_udc_pdev->dev,
 						     "det_vbus_supply");
 
@@ -3280,7 +3282,8 @@ static void sunxi_vbus_det_work(struct work_struct *work)
 {
 	struct sunxi_udc *udc = NULL;
 #if !defined(CONFIG_AW_AXP) && defined(CONFIG_POWER_SUPPLY)
-	struct power_supply *psy = NULL;
+	/* looked up once: each lookup holds a reference until the device is removed */
+	static struct power_supply *psy;
 	union power_supply_propval temp;
 #endif
 
@@ -3298,17 +3301,17 @@ static void sunxi_vbus_det_work(struct work_struct *work)
 			return;
 	}
 #elif defined CONFIG_POWER_SUPPLY
-	if (of_find_property(g_udc_pdev->dev.of_node, "det_vbus_supply", NULL))
+	if (IS_ERR_OR_NULL(psy) &&
+	    of_find_property(g_udc_pdev->dev.of_node, "det_vbus_supply", NULL))
 		psy = devm_power_supply_get_by_phandle(&g_udc_pdev->dev,
 						     "det_vbus_supply");
 
 	if (!psy || IS_ERR(psy)) {
 		DMSG_PANIC("%s()%d WARN: get power supply failed\n", __func__, __LINE__);
 	} else {
-		power_supply_get_property(psy,
-					POWER_SUPPLY_PROP_ONLINE, &temp);
-
-		while (temp.intval) {
+		/* wait while VBUS stays present: the host may only have suspended the bus */
+		while (!power_supply_get_property(psy, POWER_SUPPLY_PROP_ONLINE, &temp) &&
+		       temp.intval) {
 			msleep(1000);
 
 			/* after resume */

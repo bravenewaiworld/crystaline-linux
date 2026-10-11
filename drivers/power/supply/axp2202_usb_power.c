@@ -2,10 +2,12 @@
 /*
  * X-Powers AXP2202 USB (VBUS) power supply driver.
  *
- * Also reports the USB cable state as extcon cables, for the USB port's role switching:
+ * Also reports what is plugged in as extcon cables, for the USB port's role switching:
  * EXTCON_USB while powered by a computer or charger, EXTCON_USB_HOST while a USB device that
- * needs power is attached (from the chip's USB-C detection), and the charger type found by the
- * chip's BC1.2 detection (EXTCON_CHG_USB_*), which also sets the input current limit itself.
+ * needs power is attached (from the chip's USB-C detection), and the charger type from the
+ * chip's BC1.2 charger detection (EXTCON_CHG_USB_SDP: computer port, CDP: computer port with
+ * charging, DCP: wall charger). That detection runs only with the DT's pmu_bc12_en, and the chip
+ * then sets the input current limit from it.
  *
  * Based on Allwinner's BSP driver (github.com/radxa/allwinner-bsp).
  * Copyright(c) 2020 - 2023 Allwinner Technology Co.,Ltd. All rights reserved.
@@ -30,7 +32,8 @@ static const struct {
 } axp2202_usb_irqs[] = {
 	{ "vbus_insert", "wakeup_usb_in" },
 	{ "vbus_remove", "wakeup_usb_out" },
-	{ "cable_insert", "wakeup_typec_in" },	/* USB-C attach and detach */
+	/* USB-C plug and unplug, with or without VBUS */
+	{ "cable_insert", "wakeup_typec_in" },
 	{ "cable_remove", "wakeup_typec_out" },
 	{ "bc_done", "wakeup_bc_done" },	/* BC1.2 charger detection finished */
 };
@@ -44,11 +47,11 @@ static const unsigned int axp2202_usb_cables[] = {
 	EXTCON_NONE,
 };
 
-/* USB-C state (AXP2202_CC_STAT0 bits 3:0), the standard USB-C state machine's attached states */
+/* USB-C connection state (AXP2202_CC_STAT0 bits 3:0); 6 = the other end needs us to power it */
 #define AXP2202_CC_STATE		GENMASK(3, 0)
-#define AXP2202_CC_ATTACHED_SINK	3	/* powered by the other end */
-#define AXP2202_CC_ATTACHED_SOURCE	6	/* the other end needs power */
-/* BC1.2 result (AXP2202_BC_DECT bits 7:5): 1 SDP, 2 CDP, 3 DCP, as mainline's axp20x drivers */
+#define AXP2202_CC_ATTACHED_SOURCE	6
+/* BC1.2 result (AXP2202_BC_DECT bits 7:5): 1 = SDP, 2 = CDP, 3 = DCP (mainline Linux's AXP717
+ * driver reads the same field) */
 #define AXP2202_BC_RESULT		GENMASK(7, 5)
 
 struct axp2202_usb_power {
@@ -154,6 +157,7 @@ static const struct power_supply_desc axp2202_usb_desc = {
 /* Read the cable state from the chip and report changes. */
 static void axp2202_usb_update(struct axp2202_usb_power *usb_power)
 {
+	/* in the chip's result order: 1, 2, 3 */
 	static const unsigned int chargers[] = {
 		EXTCON_CHG_USB_SDP, EXTCON_CHG_USB_CDP, EXTCON_CHG_USB_DCP,
 	};
@@ -166,7 +170,10 @@ static void axp2202_usb_update(struct axp2202_usb_power *usb_power)
 	    regmap_read(usb_power->regmap, AXP2202_BC_DECT, &bc))
 		return;
 	host = (cc & AXP2202_CC_STATE) == AXP2202_CC_ATTACHED_SOURCE;
-	/* while host, VBUS is our own output */
+	/*
+	 * While host, VBUS_GOOD sees our own 5 V output. The BC result keeps its old value after
+	 * unplugging, so it is only used while external VBUS is present.
+	 */
 	vbus = (stat & AXP2202_VBUS_GOOD) && !host;
 	bc = vbus ? FIELD_GET(AXP2202_BC_RESULT, bc) : 0;
 
@@ -181,7 +188,7 @@ static irqreturn_t axp2202_usb_irq(int irq, void *data)
 {
 	/*
 	 * Runs in a thread (nested regmap-irq), so it may sleep. Let VBUS
-	 * settle before reporting the change.
+	 * and the USB-C state settle before reading them.
 	 */
 	msleep(20);
 	axp2202_usb_update(data);
@@ -271,7 +278,6 @@ static int axp2202_usb_probe(struct platform_device *pdev)
 	ret = devm_extcon_dev_register(&pdev->dev, usb_power->edev);
 	if (ret)
 		return ret;
-	axp2202_usb_update(usb_power);
 
 	for (i = 0; i < ARRAY_SIZE(axp2202_usb_irqs); i++) {
 		irq = platform_get_irq_byname(pdev, axp2202_usb_irqs[i].name);
@@ -295,6 +301,7 @@ static int axp2202_usb_probe(struct platform_device *pdev)
 			usb_power->sleep_irqs[i] = irq;
 	}
 
+	axp2202_usb_update(usb_power);	/* the state at probe; the IRQs report changes */
 	return 0;
 }
 

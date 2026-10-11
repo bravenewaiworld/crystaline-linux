@@ -309,14 +309,15 @@ static __s32 usb_script_parse(struct device_node *np, struct usb_cfg *cfg)
 }
 
 /*
- * Port role from cable detection (extcon) instead of the scan thread, for boards whose role
- * comes from a USB-C detector rather than an ID pin: usbc0's "extcon" property names the
- * detector. The port is host while EXTCON_USB_HOST is attached, device while EXTCON_USB is,
- * and off otherwise.
+ * OTG port role from cable detection (extcon) instead of polling an ID pin, for boards whose
+ * role comes from a USB-C detector: usbc0's "extcon" property names the detector. The port is
+ * host while EXTCON_USB_HOST is attached, device while EXTCON_USB is, and off otherwise.
+ * The vendor sysfs role files (usb_host, usb_device, usb_null) still work as debug overrides,
+ * until the next cable change; a forced host gets no VBUS without a host cable.
  */
 static struct extcon_dev *usb_edev;
-static struct notifier_block usb_extcon_nb[2];	/* one per cable: a block joins one chain */
-static struct work_struct usb_extcon_work;
+static struct notifier_block usb_extcon_nb[2];	/* one per cable: a notifier_block can be
+						 * registered for one cable only */
 
 static void usb_extcon_work_fn(struct work_struct *work)
 {
@@ -329,6 +330,8 @@ static void usb_extcon_work_fn(struct work_struct *work)
 	if (role == get_usb_role())
 		return;
 
+	/* hw_*mod_* only queue requests; usb_msg_center() carries them out: first tear down the
+	 * old role, then bring up the new one */
 	hw_rmmod_usb_host();
 	hw_rmmod_usb_device();
 	usb_msg_center(&g_usb_cfg);
@@ -339,9 +342,15 @@ static void usb_extcon_work_fn(struct work_struct *work)
 	usb_msg_center(&g_usb_cfg);
 }
 
+static DECLARE_WORK(usb_extcon_work, usb_extcon_work_fn);
+
+/*
+ * Cable events can arrive while resuming from sleep, before the USB controllers have resumed;
+ * the freezable queue holds the role switch until the system is fully awake.
+ */
 static int usb_extcon_event(struct notifier_block *nb, unsigned long event, void *ptr)
 {
-	schedule_work(&usb_extcon_work);
+	queue_work(system_freezable_wq, &usb_extcon_work);
 	return NOTIFY_DONE;
 }
 
@@ -350,7 +359,6 @@ static int usb_extcon_init(struct device *dev)
 	static const unsigned int cables[] = { EXTCON_USB, EXTCON_USB_HOST };
 	int i, ret;
 
-	INIT_WORK(&usb_extcon_work, usb_extcon_work_fn);
 	for (i = 0; i < ARRAY_SIZE(cables); i++) {
 		usb_extcon_nb[i].notifier_call = usb_extcon_event;
 		ret = devm_extcon_register_notifier(dev, usb_edev, cables[i],
@@ -358,11 +366,15 @@ static int usb_extcon_init(struct device *dev)
 		if (ret)
 			return ret;
 	}
-	schedule_work(&usb_extcon_work);	/* the cables' state at boot */
+	queue_work(system_freezable_wq, &usb_extcon_work);	/* apply the current cable state */
 	return 0;
 }
 
-/* 1 if the port must not power VBUS (no host cable, or the ID pin is high), 0 if it may. */
+/*
+ * OTG ID state for the host driver, which keeps VBUS off when this returns 1 (device side).
+ * With a cable detector (extcon): 0 while a host cable is attached, else 1. Otherwise the ID
+ * pin level, or -1 if unknown (not an OTG port, or no ID pin), which leaves VBUS allowed.
+ */
 int usb_otg_id_status(void)
 {
 	struct usb_cfg *cfg = NULL;
@@ -398,7 +410,8 @@ static int sunxi_otg_manager_probe(struct platform_device *pdev)
 	int ret = -1;
 
 	if (of_find_property(np, "extcon", NULL)) {
-		/* before anything else, as the detector may not be ready yet (-EPROBE_DEFER) */
+		/* first: if the detector's driver hasn't probed yet this returns -EPROBE_DEFER,
+		 * and nothing here needs undoing */
 		usb_edev = extcon_get_edev_by_phandle(&pdev->dev, 0);
 		if (IS_ERR(usb_edev)) {
 			ret = PTR_ERR(usb_edev);
@@ -454,11 +467,10 @@ static int sunxi_otg_manager_probe(struct platform_device *pdev)
 		wake_up_process(host_th);
 	}
 
-	if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG && usb_edev) {
-		ret = usb_extcon_init(&pdev->dev);
-		if (ret)
-			return ret;
-	} else if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG) {
+	if (g_usb_cfg.port.port_type == USB_PORT_TYPE_OTG) {
+		if (usb_edev)
+			return usb_extcon_init(&pdev->dev);
+
 		usb_hw_scan_init(&g_usb_cfg);
 
 		if (g_usb_cfg.port.detect_mode == USB_DETECT_MODE_THREAD) {
