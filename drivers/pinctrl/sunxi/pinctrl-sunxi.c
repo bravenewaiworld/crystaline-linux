@@ -1729,6 +1729,32 @@ void sunxi_pinctrl_state_show(void)
 }
 EXPORT_SYMBOL_GPL(sunxi_pinctrl_state_show);
 
+#ifdef CONFIG_SUNXI_PIO_POWER_SEL
+/*
+ * Port F (the SD card pins) has a supply switch inside the SoC (GPIO_POW_VOL_SEL bit 0:
+ * 1 = 3.3 V, 0 = 1.8 V), so its pad mode follows the requested voltage both ways. The writes are
+ * ordered so the pads are never in 1.8 V mode while the supply is at 3.3 V.
+ * Caller holds pctl->lock.
+ */
+static void sunxi_pf_select_voltage(struct sunxi_pinctrl *pctl, bool v18)
+{
+	void __iomem *mode = pctl->membase + GPIO_POW_MODE_SEL;
+	void __iomem *supply = pctl->membase + GPIO_POW_VOL_SEL;
+
+	if (v18) {
+		writel(readl(supply) & ~BIT(0), supply);
+		writel(readl(mode) | BIT(5), mode);
+	} else {
+		writel(readl(mode) & ~BIT(5), mode);
+		writel(readl(supply) | BIT(0), supply);
+	}
+}
+#endif
+
+/*
+ * sunxi_sel_pio_mode - set the I/O voltage mode of the ports a device's pins use, for signalling
+ * voltage switches (SD cards, SDIO). pm_sel: 1 = 1.8 V, 0 = 3.3 V (MMC_SIGNAL_VOLTAGE_180/_330).
+ */
 int sunxi_sel_pio_mode(struct pinctrl *pinctrl, u32 pm_sel)
 {
 #ifdef CONFIG_SUNXI_PIO_POWER_MODE
@@ -1741,9 +1767,6 @@ int sunxi_sel_pio_mode(struct pinctrl *pinctrl, u32 pm_sel)
 	unsigned num_pins = 0;
 	const char *gname;
 	u32 bank, tmp;
-#ifdef CONFIG_SUNXI_PIO_POWER_SEL
-	u32 tmp1;
-#endif
 	unsigned long flags;
 
 	list_for_each_entry(setting, &pinctrl->state->settings, node) {
@@ -1770,17 +1793,21 @@ int sunxi_sel_pio_mode(struct pinctrl *pinctrl, u32 pm_sel)
 		for (i = 0; i < num_pins; i++) {
 			bank = pins[i] / PINS_PER_BANK;
 			raw_spin_lock_irqsave(&pctl->lock, flags);
+#ifdef CONFIG_SUNXI_PIO_POWER_SEL
+			if (bank == 5) {
+				sunxi_pf_select_voltage(pctl, pm_sel);
+				raw_spin_unlock_irqrestore(&pctl->lock, flags);
+				continue;
+			}
+#endif
+			/*
+			 * Other ports' supplies are fixed by the board, so a 3.3 V request
+			 * leaves a 1.8 V mode set: the WiFi port is put in 1.8 V mode once at
+			 * probe ("sdio-used-1v8") and its driver later requests 3.3 V.
+			 */
 			tmp = readl(pctl->membase + GPIO_POW_MODE_SEL);
 			tmp |= (pm_sel << bank);
 			writel(tmp, pctl->membase + GPIO_POW_MODE_SEL);
-#ifdef CONFIG_SUNXI_PIO_POWER_SEL
-			if (bank == 5) {
-				tmp1 = readl(pctl->membase + GPIO_POW_VOL_SEL);
-				tmp1 &= ~(1>>0);
-				tmp1 |= (!pm_sel);
-				writel(tmp1, pctl->membase + GPIO_POW_VOL_SEL);
-			}
-#endif
 			raw_spin_unlock_irqrestore(&pctl->lock, flags);
 		}
 	}
