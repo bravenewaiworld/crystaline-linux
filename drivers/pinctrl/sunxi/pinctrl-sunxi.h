@@ -42,6 +42,8 @@
 	|| defined(CONFIG_ARCH_SUN50IW9P1) \
 	|| defined(CONFIG_ARCH_SUN50IW10P1) \
 	|| defined(CONFIG_ARCH_SUN50IW11P1)
+/* SoCs with per-port I/O voltage modes (GPIO_POW_MODE_SEL: one bit per port, 1 = 1.8 V pads).
+ * Not a Kconfig option. */
 #define CONFIG_SUNXI_PIO_POWER_MODE
 #define GPIO_POW_MODE_SEL  0x0340
 #define GPIO_POW_MODE_VAL  0x0348
@@ -52,6 +54,8 @@
 	|| defined(CONFIG_ARCH_SUN8IW19P1) \
 	|| defined(CONFIG_ARCH_SUN50IW10P1) \
 	|| defined(CONFIG_ARCH_SUN50IW11P1)
+/* SoCs with a supply switch for port F inside the chip (GPIO_POW_VOL_SEL); see
+ * sunxi_pf_select_voltage(). Not a Kconfig option. */
 #define CONFIG_SUNXI_PIO_POWER_SEL
 #define GPIO_POW_VOL_SEL   0x0350
 #endif

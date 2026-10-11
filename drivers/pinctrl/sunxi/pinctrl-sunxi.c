@@ -1731,9 +1731,10 @@ EXPORT_SYMBOL_GPL(sunxi_pinctrl_state_show);
 
 #ifdef CONFIG_SUNXI_PIO_POWER_SEL
 /*
- * Port F (the SD card pins) has a supply switch inside the SoC (GPIO_POW_VOL_SEL bit 0:
- * 1 = 3.3 V, 0 = 1.8 V), so its pad mode follows the requested voltage both ways. The writes are
- * ordered so the pads are never in 1.8 V mode while the supply is at 3.3 V.
+ * Port F (bank 5, the SD card pins) has a supply switch inside the SoC (GPIO_POW_VOL_SEL bit 0:
+ * 1 = 3.3 V, 0 = 1.8 V), so unlike other ports its pad mode (GPIO_POW_MODE_SEL bit 5) is set and
+ * cleared to match the requested voltage. The writes are ordered so pads in 1.8 V mode never see
+ * a 3.3 V supply, which they aren't designed for.
  * Caller holds pctl->lock.
  */
 static void sunxi_pf_select_voltage(struct sunxi_pinctrl *pctl, bool v18)
@@ -1753,7 +1754,8 @@ static void sunxi_pf_select_voltage(struct sunxi_pinctrl *pctl, bool v18)
 
 /*
  * sunxi_sel_pio_mode - set the I/O voltage mode of the ports a device's pins use, for signalling
- * voltage switches (SD cards, SDIO). pm_sel: 1 = 1.8 V, 0 = 3.3 V (MMC_SIGNAL_VOLTAGE_180/_330).
+ * voltage switches (SD cards, SDIO). pm_sel: 1 = 1.8 V, 0 = 3.3 V (MMC_SIGNAL_VOLTAGE_180/_330;
+ * no other values). Returns -EINVAL if the SoC has no voltage modes or a pin group can't be read.
  */
 int sunxi_sel_pio_mode(struct pinctrl *pinctrl, u32 pm_sel)
 {
@@ -1762,7 +1764,7 @@ int sunxi_sel_pio_mode(struct pinctrl *pinctrl, u32 pm_sel)
 	struct sunxi_pinctrl *pctl;
 	struct pinctrl_dev *pctldev;
 	const struct pinctrl_ops *pctlops;
-	int ret, i;
+	int ret = 0, i;
 	const unsigned *pins = NULL;
 	unsigned num_pins = 0;
 	const char *gname;
@@ -1801,9 +1803,10 @@ int sunxi_sel_pio_mode(struct pinctrl *pinctrl, u32 pm_sel)
 			}
 #endif
 			/*
-			 * Other ports' supplies are fixed by the board, so a 3.3 V request
-			 * leaves a 1.8 V mode set: the WiFi port is put in 1.8 V mode once at
-			 * probe ("sdio-used-1v8") and its driver later requests 3.3 V.
+			 * Other ports' supplies are fixed by the board, so this only ever turns
+			 * 1.8 V mode on. The WiFi port depends on that: its probe sets 1.8 V
+			 * mode ("sdio-used-1v8", matching its real supply), then the MMC core
+			 * requests 3.3 V, and clearing the bit would mismatch pads and supply.
 			 */
 			tmp = readl(pctl->membase + GPIO_POW_MODE_SEL);
 			tmp |= (pm_sel << bank);
