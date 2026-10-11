@@ -1233,31 +1233,26 @@ static struct resource axp2202_pek_resources[] = {
 	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_PONP, "PEK_DBR"),
 };
 
-static struct resource axp2202_ps_resources[] = {
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_SOCWL1, "soc_drop_w1"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_SOCWL2, "soc_drop_w2"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_NEWSOC, "gauge_new_soc"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VBUS_OV, "vbus_over_volt"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VINSERT, "vbus_insert"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VREMOVE, "vbus_remove"),
+/* IRQ names must match those requested by drivers/power/supply/axp2202_battery.c */
+static struct resource axp2202_bat_power_supply_resources[] = {
 	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BINSERT, "battery_insert"),
 	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BREMOVE, "battery_remove"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CHGDN, "battery_charge_done"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CHGST, "battery_charge_start"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BOVP, "battery_over_voltage"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BC_DONE, "bc1_2_detected"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BC_CHNG, "bc1_2_detect_change"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_RID_CHNG, "rid_detect_change"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BCOT, "battery_over_temp_chg"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BCUT, "battery_under_temp_chg"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BWOT, "battery_over_temp_work"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CHGST, "charge_start"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CHGDN, "charge_done"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_SOCWL1, "SOC_low_warning1"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_SOCWL2, "SOC_low_warning2"),
 	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BWUT, "battery_under_temp_work"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CREMOVE, "type-c_remove"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_CINSERT, "type-c_insert"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_TOGGLE_DONE, "type-c_toggle"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VBUS_SAFE5V, "type-c_safe-5v"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VBUS_SAFE0V, "type-c_safe-0v"),
-	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_PWR_CHNG, "type-c_state_change"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BWOT, "battery_over_temp_work"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BCUT, "battery_under_temp_chg"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BCOT, "battery_over_temp_chg"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_BOVP, "battery_over_voltage"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_NEWSOC, "gauge_new_soc"),
+};
+
+/* IRQ names must match those requested by drivers/power/supply/axp2202_usb_power.c */
+static struct resource axp2202_usb_power_supply_resources[] = {
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VINSERT, "vbus_insert"),
+	DEFINE_RES_IRQ_NAMED(AXP2202_IRQ_VREMOVE, "vbus_remove"),
 };
 
 static struct resource axp2585_pek_resources[] = {
@@ -2304,10 +2299,16 @@ static struct mfd_cell axp2202_cells[] = {
 
 	},
 	{
-		.name = "axp2202-power-supply",
-		.of_compatible = "x-powers.axp2202-power-supply",
-		.resources = axp2202_ps_resources,
-		.num_resources = ARRAY_SIZE(axp2202_ps_resources),
+		.name = "axp2202-bat-power-supply",
+		.of_compatible = "x-powers,axp2202-bat-power-supply",
+		.resources = axp2202_bat_power_supply_resources,
+		.num_resources = ARRAY_SIZE(axp2202_bat_power_supply_resources),
+	},
+	{
+		.name = "axp2202-usb-power-supply",
+		.of_compatible = "x-powers,axp2202-usb-power-supply",
+		.resources = axp2202_usb_power_supply_resources,
+		.num_resources = ARRAY_SIZE(axp2202_usb_power_supply_resources),
 	},
 };
 

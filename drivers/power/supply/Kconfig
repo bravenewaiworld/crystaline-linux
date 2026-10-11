@@ -657,6 +657,13 @@ config AXP803_POWER
 	  This driver provides support for the power supply features of
 	  AXP803 PMIC.
 
+config AXP2202_POWER
+	tristate "AXP2202 battery and USB power supply driver"
+	depends on MFD_AXP2101
+	help
+	  This driver provides support for the battery charger, fuel gauge
+	  and USB power input of the AXP2202 PMIC.
+
 config AXP2585_POWER
 	tristate "AXP2585 power supply driver"
 	depends on MFD_AXP2101

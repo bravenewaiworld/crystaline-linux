@@ -739,13 +739,15 @@ extern int axp_debug_mask;
 #define AXP2202_COMM_FAULT          (0x08)
 #define AXP2202_ICO_CFG             (0x0a)
 #define AXP2202_CLK_EN              (0x0b)
+/* Data buffer kept across reboots; the battery driver stores a smoothed SOC here */
+#define AXP2202_CURVE_CHECK         (0x0c)
 
 #define AXP2202_COMM_CFG            (0x10)
 #define AXP2202_BATFET_CTRL         (0x12)
 #define AXP2202_RBFET_CTRL          (0x13)
 #define AXP2202_DIE_TEMP_CFG        (0x14)
 #define AXP2202_VSYS_MIN            (0x15)
-#define AXP2202_VIMDPM_CFG          (0x16)
+#define AXP2202_VINDPM_CFG          (0x16)
 #define AXP2202_IIN_LIM             (0x17)
 #define AXP2202_RESET_CFG           (0x18)
 #define AXP2202_MODULE_EN           (0x19)
@@ -912,6 +914,60 @@ extern int axp_debug_mask;
 #define AXP2202_EFUS_OP_CFG         (0xf0)
 #define AXP2202_EFREG_CTRL          (0xf1)
 #define AXP2202_TWI_ADDR_EXT        (0xff)
+
+/* AXP2202_COMM_STAT0 */
+#define AXP2202_VBUS_GOOD           BIT(5)
+#define AXP2202_BAT_PRESENT         BIT(3)
+#define AXP2202_BAT_ACTIVATING      BIT(2)	/* reviving a dead cell */
+
+/* AXP2202_COMM_STAT1: charger state in bits 2:0 */
+#define AXP2202_CHG_STATE           GENMASK(2, 0)
+#define AXP2202_CHG_STATE_TRICKLE   (0)
+#define AXP2202_CHG_STATE_PRE       (1)
+#define AXP2202_CHG_STATE_CC        (2)
+#define AXP2202_CHG_STATE_CV        (3)
+#define AXP2202_CHG_STATE_DONE      (4)
+#define AXP2202_CHG_STATE_NONE      (5)
+
+/* AXP2202_COMM_FAULT */
+#define AXP2202_BAT_OVER_TEMP       BIT(1)
+#define AXP2202_BAT_UNDER_TEMP      BIT(0)
+
+/* AXP2202_RESET_CFG */
+#define AXP2202_RESET_GAUGE_MCU     BIT(2)
+
+/* AXP2202_MODULE_EN */
+#define AXP2202_CHG_EN              BIT(1)
+
+/* AXP2202_TS_CFG */
+#define AXP2202_TS_NOT_NTC          BIT(4)	/* charger ignores the TS pin */
+#define AXP2202_TS_CURRENT          GENMASK(1, 0)	/* NTC bias current */
+
+/* AXP2202_JEITA_CFG */
+#define AXP2202_JEITA_EN            BIT(0)
+
+/* AXP2202_VTERM_CFG: charge target voltage in bits 2:0 */
+#define AXP2202_VTERM               GENMASK(2, 0)
+#define AXP2202_VTERM_4_0V          (0)
+#define AXP2202_VTERM_4_1V          (1)
+#define AXP2202_VTERM_4_2V          (2)
+#define AXP2202_VTERM_4_35V         (3)
+#define AXP2202_VTERM_4_4V          (4)
+#define AXP2202_VTERM_5_0V          (7)
+
+/* AXP2202_GAUGE_CONFIG */
+/*
+ * BROM_EN opens the battery model memory at AXP2202_GAUGE_BROM; toggling it
+ * rewinds the address pointer. MODEL_LOADED is set by software after an
+ * upload and survives reboots while the PMIC stays powered.
+ */
+#define AXP2202_GAUGE_BROM_EN       BIT(0)
+#define AXP2202_GAUGE_MODEL_LOADED  BIT(4)
+
+/* AXP2202_ADC_DATA_SEL: channel read through AXP2202_ADC_DATA_H/L */
+#define AXP2202_ADC_SEL             GENMASK(1, 0)
+#define AXP2202_ADC_SEL_TS          (0)
+#define AXP2202_ADC_SEL_TDIE        (1)
 /*
  * end of define axp2202
  */
