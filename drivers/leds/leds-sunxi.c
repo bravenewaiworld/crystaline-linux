@@ -1921,9 +1921,27 @@ static int sunxi_led_resume_noirq(struct device *dev)
 	return 0;
 }
 
+/*
+ * The LEDs lose their colours in deep sleep, so send the stored ones again. This runs after
+ * resume_noirq because the transfer waits for the controller's interrupt.
+ */
+static int sunxi_led_resume(struct device *dev)
+{
+	struct sunxi_led *led = dev_get_drvdata(dev);
+	unsigned long flags;
+
+	spin_lock_irqsave(&led->lock, flags);
+	led->length = led->led_count;
+	spin_unlock_irqrestore(&led->lock, flags);
+	sunxi_ledc_trans_data(led);
+
+	return 0;
+}
+
 static const struct dev_pm_ops sunxi_led_dev_pm_ops = {
 	.suspend_noirq	 = sunxi_led_suspend_noirq,
 	.resume_noirq	 = sunxi_led_resume_noirq,
+	.resume		 = sunxi_led_resume,
 };
 
 #define SUNXI_LED_DEV_PM_OPS (&sunxi_led_dev_pm_ops)
