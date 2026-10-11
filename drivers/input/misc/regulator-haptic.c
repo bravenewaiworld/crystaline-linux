@@ -10,6 +10,7 @@
  * published by the Free Software Foundation.
  */
 
+#include <linux/gpio/consumer.h>
 #include <linux/input.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -24,6 +25,7 @@ struct regulator_haptic {
 	struct device *dev;
 	struct input_dev *input_dev;
 	struct regulator *regulator;
+	struct gpio_desc *enable_gpio;	/* optional motor switch, after the supply */
 
 	struct work_struct work;
 	struct mutex mutex;
@@ -41,6 +43,8 @@ static int regulator_haptic_toggle(struct regulator_haptic *haptic, bool on)
 	int error;
 
 	if (haptic->active != on) {
+		if (!on)
+			gpiod_set_value_cansleep(haptic->enable_gpio, 0);
 
 		error = on ? regulator_enable(haptic->regulator) :
 			     regulator_disable(haptic->regulator);
@@ -51,6 +55,8 @@ static int regulator_haptic_toggle(struct regulator_haptic *haptic, bool on)
 			return error;
 		}
 
+		if (on)
+			gpiod_set_value_cansleep(haptic->enable_gpio, 1);
 		haptic->active = on;
 	}
 
@@ -170,6 +176,10 @@ static int regulator_haptic_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Missing platform data\n");
 		return -EINVAL;
 	}
+
+	haptic->enable_gpio = devm_gpiod_get_optional(&pdev->dev, "enable", GPIOD_OUT_LOW);
+	if (IS_ERR(haptic->enable_gpio))
+		return PTR_ERR(haptic->enable_gpio);
 
 	haptic->regulator = devm_regulator_get_exclusive(&pdev->dev, "haptic");
 	if (IS_ERR(haptic->regulator)) {

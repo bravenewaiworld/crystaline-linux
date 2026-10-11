@@ -11,6 +11,10 @@ Required Properties:
  - min-microvolt : The minimum voltage value supplied to the haptic motor.
 		[The unit of the voltage is a micro]
 
+Optional Properties:
+ - enable-gpios : GPIO that switches the motor on, set after the supply is enabled
+		and cleared before it is disabled.
+
 Example:
 
 	haptics {
