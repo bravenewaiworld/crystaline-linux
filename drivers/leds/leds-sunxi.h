@@ -144,10 +144,13 @@ struct sunxi_led {
 	u32 wait_data_time_ns;
 	u32 irqnum;
 	u32 led_count;
+	/* LEDs whose chips take red and green in the opposite order (DT "swap-rg-leds") */
+	DECLARE_BITMAP(swap_rg, SUNXI_MAX_LED_COUNT);
 	u32 *data;
 	u32 length;
 	u8 result;
 	spinlock_t lock;
+	struct mutex xfer_lock;	/* one transfer at a time, across all LEDs */
 	struct device *dev;
 	dma_addr_t src_dma;
 	struct dma_chan *dma_chan;

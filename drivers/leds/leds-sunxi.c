@@ -1341,6 +1341,11 @@ static int led_regulator_request(struct sunxi_led *led)
 		LED_ERR("get regulator %s failed!\n", led->regulator_id);
 		return -1;
 	}
+	if (regulator_enable(regu)) {
+		LED_ERR("enable regulator %s failed!\n", led->regulator_id);
+		regulator_put(regu);
+		return -1;
+	}
 	led->regulator = regu;
 
 	return 0;
@@ -1351,6 +1356,7 @@ static int led_regulator_release(struct sunxi_led *led)
 	if (led->regulator == NULL)
 		return 0;
 
+	regulator_disable(led->regulator);
 	regulator_put(led->regulator);
 	led->regulator = NULL;
 
@@ -1361,7 +1367,7 @@ static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
 			enum led_brightness value)
 {
 	unsigned long flags;
-	u32 r, g, b, shift, old_data, new_data, length;
+	u32 r, g, b, new_data, length;
 	struct sunxi_led_info *pinfo;
 	struct sunxi_led_classdev_group *pcdev_group;
 	struct sunxi_led *led = sunxi_led;
@@ -1376,26 +1382,19 @@ static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
 		pcdev_group = container_of(pinfo,
 			struct sunxi_led_classdev_group, g);
 		g = value;
-		shift = 16;
 		break;
 	case LED_TYPE_R:
 		pcdev_group = container_of(pinfo,
 			struct sunxi_led_classdev_group, r);
 		r = value;
-		shift = 8;
 		break;
 
 	case LED_TYPE_B:
 		pcdev_group = container_of(pinfo,
 			struct sunxi_led_classdev_group, b);
 		b = value;
-		shift = 0;
 		break;
 	}
-
-	old_data = led->data[pcdev_group->led_num];
-	if (((old_data >> shift) & 0xFF) == value)
-		return 0;
 
 	if (pinfo->type != LED_TYPE_R)
 		r = pcdev_group->r.cdev.brightness;
@@ -1405,9 +1404,13 @@ static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
 		b = pcdev_group->b.cdev.brightness;
 
 	/* LEDC treats input data as GRB by default */
-	new_data = (g << 16) | (r << 8) | b;
+	if (test_bit(pcdev_group->led_num, led->swap_rg))
+		new_data = (r << 16) | (g << 8) | b;
+	else
+		new_data = (g << 16) | (r << 8) | b;
 	length = pcdev_group->led_num + 1;
 
+	mutex_lock(&led->xfer_lock);
 	spin_lock_irqsave(&led->lock, flags);
 	led->data[pcdev_group->led_num] = new_data;
 	led->length = length;
@@ -1420,6 +1423,7 @@ static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
 	}
 
 	sunxi_ledc_complete(led);
+	mutex_unlock(&led->xfer_lock);
 
 	do_gettimeofday(&end);
 	diff_time = 1000000 * (end.tv_sec - start.tv_sec) + end.tv_usec
@@ -1560,6 +1564,16 @@ static void sunxi_get_para_of_property(struct sunxi_led *led)
 	err = sunxi_get_u32_of_property("led_count", &val);
 	if (!err)
 		led->led_count = val;
+
+	/*
+	 * A chain can mix LED chips that expect different colour orders; list the indices of those
+	 * that take red and green swapped relative to output_mode.
+	 */
+	err = of_property_count_u32_elems(led->dev->of_node, "swap-rg-leds");
+	while (err-- > 0)
+		if (!of_property_read_u32_index(led->dev->of_node, "swap-rg-leds", err, &val) &&
+		    val < SUNXI_MAX_LED_COUNT)
+			set_bit(val, led->swap_rg);
 
 	memcpy(led->output_mode.str, "GRB", 3);
 	led->output_mode.val = SUNXI_OUTPUT_GRB;
@@ -1729,6 +1743,7 @@ static int sunxi_led_probe(struct platform_device *pdev)
 	}
 
 	sunxi_get_para_of_property(led);
+	mutex_init(&led->xfer_lock);
 
 	err = led_regulator_request(led);
 	if (err < 0) {
@@ -1930,10 +1945,13 @@ static int sunxi_led_resume(struct device *dev)
 	struct sunxi_led *led = dev_get_drvdata(dev);
 	unsigned long flags;
 
+	mutex_lock(&led->xfer_lock);
 	spin_lock_irqsave(&led->lock, flags);
 	led->length = led->led_count;
 	spin_unlock_irqrestore(&led->lock, flags);
 	sunxi_ledc_trans_data(led);
+	sunxi_ledc_complete(led);
+	mutex_unlock(&led->xfer_lock);
 
 	return 0;
 }
