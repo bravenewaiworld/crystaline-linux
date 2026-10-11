@@ -196,6 +196,32 @@ static irqreturn_t axp2202_usb_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * The chip sets the input current limit from its BC1.2 charger detection only on a plug-in, so a
+ * cable already connected at boot keeps whatever limit the bootloader set. Re-apply a limit from
+ * the stored detection result: 3 A for a wall charger (observed chip behaviour), and the BC1.2
+ * values of 500 mA for a computer port and 1.5 A for a charging computer port (not observed).
+ * With no result, the bootloader's limit stays. (Our 5 V output is always off at this point, so
+ * VBUS is external.)
+ */
+static void axp2202_usb_boot_limit(struct regmap *regmap)
+{
+	/* in the chip's result order: 1, 2, 3 */
+	static const unsigned int limit_ma[] = { 500, 1500, 3000 };
+	unsigned int stat, bc;
+
+	if (regmap_read(regmap, AXP2202_COMM_STAT0, &stat) ||
+	    regmap_read(regmap, AXP2202_BC_DECT, &bc))
+		return;
+	if (!(stat & AXP2202_VBUS_GOOD))	/* no cable: the stored result is stale */
+		return;
+	bc = FIELD_GET(AXP2202_BC_RESULT, bc);
+	if (bc < 1 || bc > ARRAY_SIZE(limit_ma))
+		return;
+	/* 100 mA + 50 mA steps in bits 5:0 */
+	regmap_update_bits(regmap, AXP2202_IIN_LIM, GENMASK(5, 0), (limit_ma[bc - 1] - 100) / 50);
+}
+
 static void axp2202_usb_init(struct axp2202_usb_power *usb_power,
 			     struct device_node *np)
 {
@@ -224,6 +250,7 @@ static void axp2202_usb_init(struct axp2202_usb_power *usb_power,
 	if (bc12_en) {
 		regmap_update_bits(regmap, AXP2202_CLK_EN, BIT(4), BIT(4));
 		regmap_update_bits(regmap, AXP2202_IIN_LIM, BIT(7), 0);
+		axp2202_usb_boot_limit(regmap);
 	} else {
 		regmap_update_bits(regmap, AXP2202_CLK_EN, BIT(4), 0);
 		regmap_update_bits(regmap, AXP2202_IIN_LIM, BIT(7), BIT(7));
