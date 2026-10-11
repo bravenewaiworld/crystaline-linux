@@ -66,6 +66,12 @@ static int sun50i_nvmem_get_data(char *cell_name, u32 *data)
 		goto err;
 	}
 
+	/* Not described in this DT; the caller decides whether that is fatal. */
+	if (of_property_match_string(np, "nvmem-cell-names", cell_name) < 0) {
+		ret = -ENOENT;
+		goto err;
+	}
+
 	cell_nvmem = of_nvmem_cell_get(np, cell_name);
 	if (IS_ERR(cell_nvmem)) {
 		if (PTR_ERR(cell_nvmem) != -EPROBE_DEFER)
@@ -232,6 +238,10 @@ static void sun50iw10_nvmem_xlate(u32 *versions, char *name)
 	case 0x4000:
 		sun50iw10_bin_xlate(true, name, ver_data.nv_bin);
 		break;
+	case 0x8000:
+		/* Mapping used by TrimUI's stock A133P kernel; ignores "bin". */
+		snprintf(name, MAX_NAME_LEN, "c0");
+		break;
 	case 0x0400:
 	default:
 		sun50iw10_bin_xlate(false, name, ver_data.nv_bin);
@@ -295,8 +305,9 @@ static int sun50i_cpufreq_get_efuse(const struct cpufreq_soc_data *soc_data,
 		ptr = sun50i_nvmem_get_data("bin", &ver_data.nv_bin);
 		if (ptr)
 			return ptr;
+		/* Absent from older DTs (e.g. TrimUI's); nv_bin_ext stays 0. */
 		ptr = sun50i_nvmem_get_data("bin_ext", &ver_data.nv_bin_ext);
-		if (ptr)
+		if (ptr && ptr != -ENOENT)
 			return ptr;
 	}
 
