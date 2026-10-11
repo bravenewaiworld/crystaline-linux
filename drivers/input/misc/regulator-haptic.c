@@ -25,7 +25,8 @@ struct regulator_haptic {
 	struct device *dev;
 	struct input_dev *input_dev;
 	struct regulator *regulator;
-	struct gpio_desc *enable_gpio;	/* optional motor switch, after the supply */
+	/* optional motor switch: set after the supply is enabled, cleared before it is disabled */
+	struct gpio_desc *enable_gpio;
 
 	struct work_struct work;
 	struct mutex mutex;

@@ -1403,7 +1403,10 @@ static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
 	if (pinfo->type != LED_TYPE_B)
 		b = pcdev_group->b.cdev.brightness;
 
-	/* LEDC treats input data as GRB by default */
+	/*
+	 * Packed G,R,B, the order output_mode (default "GRB") sends; LEDs in swap_rg take red and
+	 * green the other way round.
+	 */
 	if (test_bit(pcdev_group->led_num, led->swap_rg))
 		new_data = (r << 16) | (g << 8) | b;
 	else
@@ -1560,6 +1563,8 @@ static void sunxi_get_para_of_property(struct sunxi_led *led)
 	int err;
 	u32 val;
 	const char *str;
+	struct property *prop;
+	const __be32 *p;
 
 	err = sunxi_get_u32_of_property("led_count", &val);
 	if (!err)
@@ -1569,10 +1574,8 @@ static void sunxi_get_para_of_property(struct sunxi_led *led)
 	 * A chain can mix LED chips that expect different colour orders; list the indices of those
 	 * that take red and green swapped relative to output_mode.
 	 */
-	err = of_property_count_u32_elems(led->dev->of_node, "swap-rg-leds");
-	while (err-- > 0)
-		if (!of_property_read_u32_index(led->dev->of_node, "swap-rg-leds", err, &val) &&
-		    val < SUNXI_MAX_LED_COUNT)
+	of_property_for_each_u32(led->dev->of_node, "swap-rg-leds", prop, p, val)
+		if (val < SUNXI_MAX_LED_COUNT)
 			set_bit(val, led->swap_rg);
 
 	memcpy(led->output_mode.str, "GRB", 3);
@@ -1937,8 +1940,9 @@ static int sunxi_led_resume_noirq(struct device *dev)
 }
 
 /*
- * The LEDs lose their colours in deep sleep, so send the stored ones again. This runs after
- * resume_noirq because the transfer waits for the controller's interrupt.
+ * The LEDs lose their colours in deep sleep, so send the stored ones again. A normal resume
+ * callback rather than resume_noirq, because the transfer waits for the controller's interrupt,
+ * which isn't delivered in the noirq phase.
  */
 static int sunxi_led_resume(struct device *dev)
 {

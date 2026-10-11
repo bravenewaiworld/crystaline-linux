@@ -60,11 +60,7 @@ static const struct sample_rate sample_rate_conv[] = {
 	{192000, 6},
 };
 
-/*
- * "digital volume" and "Headphone Volume" are attenuations in hardware (register 0 = loudest), so
- * their controls are inverted: higher values are louder, as the dB scales say.
- */
-static const DECLARE_TLV_DB_SCALE(digital_tlv, -7424, 116, 0);
+static const DECLARE_TLV_DB_SCALE(digital_tlv, -7308, 116, 0);
 static const DECLARE_TLV_DB_SCALE(headphone_gain_tlv, -4200, 600, 0);
 static const DECLARE_TLV_DB_SCALE(mic1gain_tlv, 0, 100, 0);
 static const DECLARE_TLV_DB_SCALE(mic2gain_tlv, 0, 100, 0);
@@ -636,8 +632,9 @@ static int sunxi_codec_hpspeaker_event(struct snd_soc_dapm_widget *w,
 }
 
 /*
- * The headphone amplifier. The speaker amplifier is fed from the headphone outputs, so this
- * powers both the Headphone and HpSpeaker paths (see the "HP Amp" routes).
+ * The codec's headphone amplifier. The external speaker amplifier (see
+ * sunxi_codec_hpspeaker_event) takes its input from the headphone outputs, so DAPM powers this
+ * whenever Headphone or HpSpeaker is active (see the "HP Amp" routes).
  */
 static int sunxi_codec_hpamp_event(struct snd_soc_dapm_widget *w,
 			struct snd_kcontrol *k,	int event)
@@ -828,7 +825,7 @@ static const struct snd_kcontrol_new sunxi_codec_controls[] = {
 	SOC_ENUM_EXT("ADC Swap", sunxi_codec_adcswap_func_enum[0],
 				sunxi_codec_get_adcswap_mode,
 				sunxi_codec_set_adcswap_mode),
-	/* Digital Volume */
+	/* Digital Volume: register 0 = loudest; inverted so higher is louder */
 	SOC_SINGLE_TLV("digital volume", SUNXI_DAC_DPC,
 					DVOL, 0x3F, 1, digital_tlv),
 	/* MIC1 Gain */
@@ -846,7 +843,7 @@ static const struct snd_kcontrol_new sunxi_codec_controls[] = {
 	/* ADC Volume */
 	SOC_DOUBLE_TLV("ADC volume", SUNXI_ADC_VOL_CTRL, ADC_VOL_L, ADC_VOL_R,
 		       0xFF, 0, adc_vol_tlv),
-	/* Headphone Gain */
+	/* Headphone Gain: register 0 = loudest; inverted so higher is louder */
 	SOC_SINGLE_TLV("Headphone Volume", SUNXI_DAC_REG, HEADPHONE_GAIN,
 			0x7, 1, headphone_gain_tlv),
 };
