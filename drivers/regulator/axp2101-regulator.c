@@ -988,10 +988,10 @@ static int axp20x_regulator_parse_dt(struct platform_device *pdev)
 	return 0;
 }
 
-static int axp20x_set_dcdc_workmode(struct regulator_dev *rdev, int id, u32 workmode)
+/* The PMIC is passed in: probe replaces the regulator's driver data with its delays. */
+static int axp20x_set_dcdc_workmode(struct axp20x_dev *axp20x, struct regulator_dev *rdev,
+				    int id, u32 workmode)
 {
-	/* not rdev_get_drvdata(): probe replaces it with the regulator's delays (rdev->reg_data) */
-	struct axp20x_dev *axp20x = dev_get_drvdata(rdev->dev.parent);
 	unsigned int reg = AXP20X_DCDC_MODE;
 	unsigned int mask;
 
@@ -1035,7 +1035,7 @@ static int axp20x_set_dcdc_workmode(struct regulator_dev *rdev, int id, u32 work
 			return -EINVAL;
 		reg = AXP2202_DCDC_CFG1;
 		mask = BIT(id - AXP2202_DCDC1 + 2);
-		workmode <<= id - AXP2202_DCDC1 + 2;
+		workmode = workmode ? mask : 0;
 		break;
 	default:
 		/* should not happen */
@@ -1223,7 +1223,7 @@ static int axp2101_regulator_probe(struct platform_device *pdev)
 					   "x-powers,dcdc-workmode",
 					   &workmode);
 		if (!ret) {
-			if (axp20x_set_dcdc_workmode(rdev, i, workmode))
+			if (axp20x_set_dcdc_workmode(axp20x, rdev, i, workmode))
 				dev_err(&pdev->dev, "Failed to set workmode on %s\n",
 					rdev->desc->name);
 		}

@@ -403,7 +403,8 @@ static int fan53555_regulator_probe(struct i2c_client *client,
 	if (!di)
 		return -ENOMEM;
 
-	di->desc.of_map_mode = fan53555_map_mode;	/* used by the DT parse */
+	/* lets fan53555_parse_dt() accept "regulator-initial-mode" */
+	di->desc.of_map_mode = fan53555_map_mode;
 	pdata = dev_get_platdata(&client->dev);
 	if (!pdata)
 		pdata = fan53555_parse_dt(&client->dev, np, &di->desc);
