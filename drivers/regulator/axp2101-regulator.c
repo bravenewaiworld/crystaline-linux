@@ -990,7 +990,8 @@ static int axp20x_regulator_parse_dt(struct platform_device *pdev)
 
 static int axp20x_set_dcdc_workmode(struct regulator_dev *rdev, int id, u32 workmode)
 {
-	struct axp20x_dev *axp20x = rdev_get_drvdata(rdev);
+	/* not rdev_get_drvdata(): probe replaces it with the regulator's delays (rdev->reg_data) */
+	struct axp20x_dev *axp20x = dev_get_drvdata(rdev->dev.parent);
 	unsigned int reg = AXP20X_DCDC_MODE;
 	unsigned int mask;
 
@@ -1027,6 +1028,14 @@ static int axp20x_set_dcdc_workmode(struct regulator_dev *rdev, int id, u32 work
 		reg = AXP2101_DCDC_CFG1;
 		mask = GENMASK(5, 2);
 		workmode <<= id + 2;
+		break;
+	case AXP2202_ID:
+		/* DCDC_CFG1 bits 2 and 3: DCDC1 and DCDC2 forced PWM (1) or automatic (0) */
+		if (id != AXP2202_DCDC1 && id != AXP2202_DCDC2)
+			return -EINVAL;
+		reg = AXP2202_DCDC_CFG1;
+		mask = BIT(id - AXP2202_DCDC1 + 2);
+		workmode <<= id - AXP2202_DCDC1 + 2;
 		break;
 	default:
 		/* should not happen */

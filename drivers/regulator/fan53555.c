@@ -155,6 +155,13 @@ static int fan53555_set_mode(struct regulator_dev *rdev, unsigned int mode)
 	return 0;
 }
 
+/* DT "regulator-initial-mode": REGULATOR_MODE_FAST (1, forced PWM) or REGULATOR_MODE_NORMAL (2,
+ * automatic: power-saving at light load) */
+static unsigned int fan53555_map_mode(unsigned int mode)
+{
+	return mode == REGULATOR_MODE_FAST || mode == REGULATOR_MODE_NORMAL ? mode : -EINVAL;
+}
+
 static unsigned int fan53555_get_mode(struct regulator_dev *rdev)
 {
 	struct fan53555_device_info *di = rdev_get_drvdata(rdev);
@@ -396,6 +403,7 @@ static int fan53555_regulator_probe(struct i2c_client *client,
 	if (!di)
 		return -ENOMEM;
 
+	di->desc.of_map_mode = fan53555_map_mode;	/* used by the DT parse */
 	pdata = dev_get_platdata(&client->dev);
 	if (!pdata)
 		pdata = fan53555_parse_dt(&client->dev, np, &di->desc);
