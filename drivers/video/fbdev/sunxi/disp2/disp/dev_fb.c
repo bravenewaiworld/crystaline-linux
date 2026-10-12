@@ -1372,7 +1372,17 @@ static int sunxi_fb_ioctl(struct fb_info *info, unsigned int cmd,
 
 	case FBIO_WAITFORVSYNC:
 		{
-			/* ret = fb_wait_for_vsync(info); */
+			/* Blocks until the display engine's next frame sync,
+			 * when a new layer configuration (a page flip) takes
+			 * effect. Userspace paces its frames by it.
+			 * fbmem calls fb_ioctl with the fb_info lock held;
+			 * waiting with it held would block page flips (pan
+			 * display) and every other fb call for the whole
+			 * frame, so it is released while waiting.
+			 */
+			mutex_unlock(&info->lock);
+			ret = fb_wait_for_vsync(info);
+			mutex_lock(&info->lock);
 			break;
 		}
 
