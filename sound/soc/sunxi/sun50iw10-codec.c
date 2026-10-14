@@ -950,9 +950,13 @@ static void sunxi_codec_init(struct snd_soc_codec *codec)
 {
 	struct sunxi_codec_info *sunxi_codec = snd_soc_codec_get_drvdata(codec);
 
-	/* DAC_VOL_SEL default disabled */
-	snd_soc_update_bits(codec, SUNXI_DAC_VOL_CTRL,
-			(0x1 << DAC_VOL_SEL), (0x1 << DAC_VOL_SEL));
+	/*
+	 * The DAC volume register starts at the device tree's dac_digital_vol
+	 * (including its DAC_VOL_SEL bit, which turns the digital volume on);
+	 * after that, only the "DAC volume" control changes it. On resume,
+	 * echo_audio_reg() then puts back the level from before suspend.
+	 */
+	snd_soc_write(codec, SUNXI_DAC_VOL_CTRL, sunxi_codec->dac_digital_vol);
 
 	/* ADC_VOL_SEL default disabled */
 	snd_soc_update_bits(codec, SUNXI_ADC_VOL_CTRL,
@@ -1224,21 +1228,6 @@ static void sunxi_codec_shutdown(struct snd_pcm_substream *substream,
 #endif
 }
 
-static int sunxi_codec_digital_mute(struct snd_soc_dai *dai, int mute)
-{
-	struct snd_soc_codec *codec = dai->codec;
-	struct sunxi_codec_info *sunxi_codec = snd_soc_codec_get_drvdata(codec);
-
-	if (mute) {
-		snd_soc_write(codec, SUNXI_DAC_VOL_CTRL, 0);
-	} else {
-		snd_soc_write(codec, SUNXI_DAC_VOL_CTRL,
-				sunxi_codec->dac_digital_vol);
-	}
-
-	return 0;
-}
-
 static int sunxi_codec_prepare(struct snd_pcm_substream *substream,
 				struct snd_soc_dai *dai)
 {
@@ -1298,7 +1287,6 @@ static const struct snd_soc_dai_ops sunxi_codec_dai_ops = {
 	.startup	= sunxi_codec_startup,
 	.hw_params	= sunxi_codec_hw_params,
 	.shutdown	= sunxi_codec_shutdown,
-	.digital_mute	= sunxi_codec_digital_mute,
 	.set_sysclk	= sunxi_codec_set_sysclk,
 	.trigger	= sunxi_codec_trigger,
 	.prepare	= sunxi_codec_prepare,
