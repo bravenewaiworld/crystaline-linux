@@ -1218,6 +1218,16 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		unlock_fb_info(info);
 		console_unlock();
 		break;
+	case FBIO_WAITFORVSYNC:
+		/* Without the fb_info lock: a driver that waits for the
+		 * refresh in pan_display (sunxi disp2, whose page flips come
+		 * from the GPU driver with the lock held) holds it for up to a
+		 * frame, so a caller blocked on it would wake a refresh late
+		 * and miss one. Drivers must implement this without the lock.
+		 */
+		fb = info->fbops;
+		ret = fb->fb_ioctl ? fb->fb_ioctl(info, cmd, arg) : -ENOTTY;
+		break;
 	default:
 		if (!lock_fb_info(info))
 			return -ENODEV;
