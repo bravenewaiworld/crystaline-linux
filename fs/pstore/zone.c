@@ -757,10 +757,13 @@ static inline int notrace psz_kmsg_write_record(struct psz_context *cxt,
 		if (unlikely(!zone))
 			return -ENOSPC;
 
-		/* avoid destroying old data, allocate a new one */
+		/*
+		 * avoid destroying old data, allocate a new one; without
+		 * sleeping, as this runs in oops and panic context
+		 */
 		len = zone->buffer_size + sizeof(*zone->buffer);
 		zone->oldbuf = zone->buffer;
-		zone->buffer = kzalloc(len, GFP_KERNEL);
+		zone->buffer = kzalloc(len, GFP_ATOMIC);
 		if (!zone->buffer) {
 			zone->buffer = zone->oldbuf;
 			return -ENOMEM;
