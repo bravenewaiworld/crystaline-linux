@@ -21,5 +21,4 @@ sunxi_mmc_panic_rtest(struct device *dev, struct device_attribute *attr, char *b
 ssize_t
 sunxi_mmc_pancic_wrtest(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t count);
-int sunxi_mmc_panic_init_ps(void *data);
 #endif

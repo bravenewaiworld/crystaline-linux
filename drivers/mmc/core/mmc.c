@@ -29,10 +29,6 @@
 #define DEFAULT_CMD6_TIMEOUT_MS	500
 #define MIN_CACHE_EN_TIMEOUT_MS 1600
 
-#if IS_ENABLED(CONFIG_PSTORE_BLK)
-int sunxi_mmc_panic_init_ps(void *data);
-#endif
-
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
 	0,		0,		0,		0
@@ -2213,11 +2209,8 @@ int mmc_attach_mmc(struct mmc_host *host)
 	if (err)
 		goto remove_card;
 
+	sunxi_mmc_panic_init_ps(host);
 	mmc_claim_host(host);
-
-#if IS_ENABLED(CONFIG_PSTORE_BLK)
-	sunxi_mmc_panic_init_ps(NULL);
-#endif
 	return 0;
 
 remove_card:

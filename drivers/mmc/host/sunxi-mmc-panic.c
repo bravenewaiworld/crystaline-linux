@@ -30,6 +30,9 @@
 #include <linux/of_platform.h>
 #include <linux/regulator/consumer.h>
 #include <linux/delay.h>
+#include <linux/genhd.h>
+#include <linux/module.h>
+#include <linux/mount.h>
 #include <linux/pstore_blk.h>
 
 #include <linux/mmc/host.h>
@@ -43,7 +46,6 @@
 #include "sunxi-mmc.h"
 #include "sunxi-mmc-export.h"
 
-#define NCAT
 //#define MMC_DEBUG
 #define SUNXI_TEST_SIZE	(512*4)
 
@@ -87,13 +89,7 @@
 
 
 
-#ifndef NCAT
-#define SUNXI_SMHC_BASE  0x1c11000
-#define SUNXI_CCMU_BASE  0x1c20000
-#else
-#define SUNXI_SMHC_BASE  0x4022000
 #define SUNXI_CCMU_BASE		0x3001000
-#endif
 
 
 #define SDXC_REG_EDSD		(0x010C)
@@ -108,15 +104,14 @@
 #define SDXC_DAT_STARV_ERR	SDXC_VOLTAGE_CHANGE_DONE
 
 
-#ifndef NCAT
-#define SUNXI_MMC_GATR		(0x60)
-#define SUNXI_MMC_MODR		(0x90)
-#define SUNXI_MMC_RST		(0x2C0)
-#else
+/*
+ * Clock controller (CCU) registers of controller sdc<i> (i is the host's phy_index): its
+ * module clock register, and its bus clock gate (bit i) and reset (bit 16 + i) in the gate and
+ * reset register that sdc0-sdc3 share.
+ */
+#define SUNXI_MMC_MODR(i)	(0x830 + 4 * (i))
 #define SUNXI_MMC_GATR		(0x84c)
-#define SUNXI_MMC_MODR		(0x838)
-#define SUNXI_MMC_RST		(0x84c)
-#endif
+#define SUNXI_MMC_GATE_RST(i)	(BIT(i) | BIT(16 + (i)))
 
 
 #ifdef MMC_DEBUG
@@ -152,66 +147,37 @@ struct sunxi_mmc_mbak_regs {
 
 static struct sunxi_mmc_mbak_regs gmbak_regs;
 static char *gccmu_base_reg;
-static char *ghost_base_reg;
 
-static int init_cnt;
+#if IS_BUILTIN(CONFIG_PSTORE_BLK) && IS_BUILTIN(CONFIG_MMC_SUNXI)	/* as include/linux/mmc/host.h */
+/* The host whose card holds pstore/blk's partition; set once registration succeeded. */
+static struct sunxi_mmc_host *ps_host;
 static sector_t blkdev_start_sect;
 static sector_t blkdev_sects;
-
-#ifdef NCAT
-static void sunxi_mmc_mbusrst_host(char *host)
-{
-	char *ccmu_reg = gccmu_base_reg;
-
-	u32 rval = 0;
-	rval = readl(ccmu_reg + SUNXI_MMC_GATR);
-	rval &= ~((1u<<2)|(1u<<18));
-	writel(rval, ccmu_reg + SUNXI_MMC_GATR);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_MODR);
-	rval &= ~((1<<31));
-	writel(rval, ccmu_reg + SUNXI_MMC_MODR);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_MODR);
-	rval |= (1<<31);
-	writel(rval, ccmu_reg + SUNXI_MMC_MODR);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_GATR);
-	rval |= ((1u<<2)|(1u<<18));
-	writel(rval, ccmu_reg + SUNXI_MMC_GATR);
-}
-#else
-
-static void sunxi_mmc_mbusrst_host(char *host)
-{
-	char *ccmu_reg = gccmu_base_reg;
-	u32 rval = 0;
-
-	rval = readl(ccmu_reg + SUNXI_MMC_GATR);
-	rval &= ~(1u<<10);
-	writel(rval, ccmu_reg + SUNXI_MMC_GATR);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_RST);
-	rval &= ~(1u<<10);
-	writel(rval, ccmu_reg + SUNXI_MMC_RST);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_MODR);
-	rval &= ~((1<<31));
-	writel(rval, ccmu_reg + SUNXI_MMC_MODR);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_MODR);
-	rval |= (1<<31);
-	writel(rval, ccmu_reg + SUNXI_MMC_MODR);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_RST);
-	rval |= (1u<<10);
-	writel(rval, ccmu_reg + SUNXI_MMC_RST);
-
-	rval = readl(ccmu_reg + SUNXI_MMC_GATR);
-	rval |= (1u<<10);
-	writel(rval, ccmu_reg + SUNXI_MMC_GATR);
-}
 #endif
+
+static void sunxi_mmc_mbusrst_host(struct sunxi_mmc_host *host)
+{
+	char *ccmu_reg = gccmu_base_reg;
+	u32 gate_rst = SUNXI_MMC_GATE_RST(host->phy_index);
+	u32 modr = SUNXI_MMC_MODR(host->phy_index);
+	u32 rval = 0;
+
+	rval = readl(ccmu_reg + SUNXI_MMC_GATR);
+	rval &= ~gate_rst;
+	writel(rval, ccmu_reg + SUNXI_MMC_GATR);
+
+	rval = readl(ccmu_reg + modr);
+	rval &= ~((1<<31));
+	writel(rval, ccmu_reg + modr);
+
+	rval = readl(ccmu_reg + modr);
+	rval |= (1<<31);
+	writel(rval, ccmu_reg + modr);
+
+	rval = readl(ccmu_reg + SUNXI_MMC_GATR);
+	rval |= gate_rst;
+	writel(rval, ccmu_reg + SUNXI_MMC_GATR);
+}
 
 
 static const char mtsdat[512] = {
@@ -319,32 +285,34 @@ static void sunxi_mmc_regs_save(char *host)
 	bak_regs->csdc = mmc_mreadl(host, REG_CSDC);
 }
 
-static void sunxi_mmc_regs_restore(char *host)
+static void sunxi_mmc_regs_restore(struct sunxi_mmc_host *host)
 {
 	struct sunxi_mmc_mbak_regs *bak_regs = &gmbak_regs;
+	char *reg = host->reg_base;
 	char *ccmu_reg = gccmu_base_reg;
+	u32 modr = SUNXI_MMC_MODR(host->phy_index);
 	u32 rval = 0;
 
 	/*restore public register */
-	mmc_mwritel(host, REG_GCTRL, bak_regs->gctrl);
-	mmc_mwritel(host, REG_CLKCR, bak_regs->clkc);
-	mmc_mwritel(host, REG_TMOUT, bak_regs->timeout);
-	mmc_mwritel(host, REG_WIDTH, bak_regs->buswid);
-	mmc_mwritel(host, REG_DBGC, bak_regs->debugc);
+	mmc_mwritel(reg, REG_GCTRL, bak_regs->gctrl);
+	mmc_mwritel(reg, REG_CLKCR, bak_regs->clkc);
+	mmc_mwritel(reg, REG_TMOUT, bak_regs->timeout);
+	mmc_mwritel(reg, REG_WIDTH, bak_regs->buswid);
+	mmc_mwritel(reg, REG_DBGC, bak_regs->debugc);
 
-	rval = readl(ccmu_reg + SUNXI_MMC_MODR);
+	rval = readl(ccmu_reg + modr);
 	rval &= ~((1<<31));
-	writel(rval, ccmu_reg + SUNXI_MMC_MODR);
-	mmc_mwritel(host, REG_DRV_DL, bak_regs->drv_dl);
-	rval = readl(ccmu_reg + SUNXI_MMC_MODR);
+	writel(rval, ccmu_reg + modr);
+	mmc_mwritel(reg, REG_DRV_DL, bak_regs->drv_dl);
+	rval = readl(ccmu_reg + modr);
 	rval |= (1<<31);
-	writel(rval, ccmu_reg + SUNXI_MMC_MODR);
+	writel(rval, ccmu_reg + modr);
 
-	mmc_mwritel(host, REG_SAMP_DL, bak_regs->samp_dl);
-	mmc_mwritel(host, REG_DS_DL, bak_regs->ds_dl);
-	mmc_mwritel(host, REG_SD_NTSR, bak_regs->sd_ntsr);
-	mmc_mwritel(host, REG_EDSD, bak_regs->edsd);
-	mmc_mwritel(host, REG_CSDC, bak_regs->csdc);
+	mmc_mwritel(reg, REG_SAMP_DL, bak_regs->samp_dl);
+	mmc_mwritel(reg, REG_DS_DL, bak_regs->ds_dl);
+	mmc_mwritel(reg, REG_SD_NTSR, bak_regs->sd_ntsr);
+	mmc_mwritel(reg, REG_EDSD, bak_regs->edsd);
+	mmc_mwritel(reg, REG_CSDC, bak_regs->csdc);
 }
 
 static int sunxi_mmc_mupdate_clk(char *host)
@@ -389,12 +357,12 @@ static int sunxi_mmc_mupdate_clk(char *host)
 
 
 
-static void sunxi_mmc_rcover_host(char *host)
+static void sunxi_mmc_rcover_host(struct sunxi_mmc_host *host)
 {
-	sunxi_mmc_regs_save(host);
+	sunxi_mmc_regs_save(host->reg_base);
 	sunxi_mmc_mbusrst_host(host);
 	sunxi_mmc_regs_restore(host);
-	sunxi_mmc_mupdate_clk(host);
+	sunxi_mmc_mupdate_clk(host->reg_base);
 }
 
 static int sunxi_mmc_mchk_r1_rdy(char *reg, int to_ns)
@@ -841,17 +809,14 @@ eout:
 
 
 /**use for panic situation,no irq,no lock,no dma**/
-int sunxi_mmc_panic_read(u32 sec_addr, u32 sec_cnt, char *outbuf)
+static int sunxi_mmc_panic_read(struct sunxi_mmc_host *host, u32 sec_addr,
+				u32 sec_cnt, char *outbuf)
 {
-	char *reg = ghost_base_reg;
+	char *reg = host->reg_base;
 	int ret = 0;
 	u32 cmd_val = 0;
 
 	BUG_ON(outbuf == NULL);
-	if (!ghost_base_reg || !gccmu_base_reg) {
-		mmcerr("host,ccmu reg has not init\n");
-		return MWR_RFAIL;
-	}
 
 	cmd_val = mmc_mreadl(reg, REG_CMDR);
 
@@ -862,7 +827,7 @@ int sunxi_mmc_panic_read(u32 sec_addr, u32 sec_cnt, char *outbuf)
 	if (cmd_val & SDXC_DATA_EXPECT)
 		sunxi_mmc_raw_stop(reg);
 
-	sunxi_mmc_rcover_host(reg);
+	sunxi_mmc_rcover_host(host);
 
 	if (cmd_val & SDXC_DATA_EXPECT)
 		sunxi_mmc_raw_stop(reg);
@@ -876,18 +841,14 @@ int sunxi_mmc_panic_read(u32 sec_addr, u32 sec_cnt, char *outbuf)
 }
 
 /**use for panic situation,no irq,no lock,no dma**/
-int sunxi_mmc_panic_write(u32 sec_addr, u32 sec_cnt, const char *inbuf)
+static int sunxi_mmc_panic_write(struct sunxi_mmc_host *host, u32 sec_addr,
+				 u32 sec_cnt, const char *inbuf)
 {
 	int ret = 0;
 	u32 cmd_val = 0;
-	char *reg = ghost_base_reg;
+	char *reg = host->reg_base;
 
-	cmd_val = mmc_mreadl(reg, REG_CMDR);
 	BUG_ON(inbuf == NULL);
-	if (!ghost_base_reg || !gccmu_base_reg) {
-		mmcerr("host,ccmu reg has not init\n");
-		return MWR_RFAIL;
-	}
 
 	ret = sunxi_mmc_raw_wcmd_clr(reg, &cmd_val);
 	if (ret)
@@ -896,7 +857,7 @@ int sunxi_mmc_panic_write(u32 sec_addr, u32 sec_cnt, const char *inbuf)
 	if (cmd_val & SDXC_DATA_EXPECT)
 		sunxi_mmc_raw_stop(reg);
 
-	sunxi_mmc_rcover_host(reg);
+	sunxi_mmc_rcover_host(host);
 
 	if (cmd_val & SDXC_DATA_EXPECT)
 		sunxi_mmc_raw_stop(reg);
@@ -909,26 +870,19 @@ int sunxi_mmc_panic_write(u32 sec_addr, u32 sec_cnt, const char *inbuf)
 	return sunxi_mmc_raw_write(reg, sec_addr, sec_cnt, inbuf);
 }
 
-int sunxi_mmc_panic_init(void)
+/*
+ * Maps the CCU once and never unmaps it. The clock driver uses the same registers, so the
+ * region is not reserved.
+ */
+static int sunxi_mmc_panic_init(void)
 {
-	gccmu_base_reg = ioremap(SUNXI_CCMU_BASE, 0x900);
+	if (!gccmu_base_reg)
+		gccmu_base_reg = ioremap(SUNXI_CCMU_BASE, 0x900);
 	if (!gccmu_base_reg) {
 		mmcerr("*iormap ccmu failed*\n");
 		return MWR_RFAIL;
 	}
-
-	ghost_base_reg = ioremap(SUNXI_SMHC_BASE, 0x300);
-	if (!ghost_base_reg) {
-		mmcerr("*iormap host failed*\n");
-		return MWR_RFAIL;
-	}
 	return MWR_ROK;
-}
-
-void sunxi_mmc_panic_exit(void)
-{
-	iounmap(gccmu_base_reg);
-	iounmap(ghost_base_reg);
 }
 
 ssize_t
@@ -937,21 +891,22 @@ sunxi_mmc_panic_rtest(struct device *dev,
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct mmc_host	*mmc = platform_get_drvdata(pdev);
+	struct sunxi_mmc_host *host = mmc_priv(mmc);
 	char *rxbuf = kzalloc(SUNXI_TEST_SIZE, GFP_KERNEL);
 	int ret = 0;
 
 	printk("Start panic read test\n");
 
 	mmc_claim_host(mmc);
-	sunxi_mmc_panic_init();
-	ret = sunxi_mmc_panic_read(16, SUNXI_TEST_SIZE/512, rxbuf);
-	if (ret)
-		goto out;
-	buf_dumphex32("rxbuf", rxbuf, SUNXI_TEST_SIZE);
-	printk(KERN_INFO "panic read ok\n");
+	ret = sunxi_mmc_panic_init();
+	if (!ret)
+		ret = sunxi_mmc_panic_read(host, 16, SUNXI_TEST_SIZE/512, rxbuf);
 	mmc_release_host(mmc);
+	if (!ret) {
+		buf_dumphex32("rxbuf", rxbuf, SUNXI_TEST_SIZE);
+		printk(KERN_INFO "panic read ok\n");
+	}
 
-out:
 	kfree(rxbuf);
 	return SUNXI_TEST_SIZE;
 }
@@ -962,13 +917,14 @@ sunxi_mmc_pancic_wrtest(struct device *dev, struct device_attribute *attr,
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct mmc_host	*mmc = platform_get_drvdata(pdev);
+	struct sunxi_mmc_host *host = mmc_priv(mmc);
 	char *rxbuf = kzalloc(SUNXI_TEST_SIZE, GFP_KERNEL);
 	char *mwr_tsdat = kzalloc(SUNXI_TEST_SIZE, GFP_KERNEL);
 	int sc = 0;
 	int i = 0;
-	char *reg = NULL;
+	char *reg = host->reg_base;
 	if (kstrtoint(buf, 0, &sc))
-		goto out;
+		goto free;
 
 	mmcinfo(KERN_INFO "Start test sec %d\n", sc);
 	for (i = 0; i < (SUNXI_TEST_SIZE/512); i++)
@@ -976,14 +932,14 @@ sunxi_mmc_pancic_wrtest(struct device *dev, struct device_attribute *attr,
 
 
 	mmc_claim_host(mmc);
-	sunxi_mmc_panic_init();
-	reg = ghost_base_reg;
+	if (sunxi_mmc_panic_init())
+		goto out;
 	mmcinfo("***Test normal w/r***\n");
 	buf_dumphex32("test data", mwr_tsdat, SUNXI_TEST_SIZE);
 	mmcdbg("Write test data\n");
-	sunxi_mmc_panic_write(sc, SUNXI_TEST_SIZE/512, mwr_tsdat);
+	sunxi_mmc_panic_write(host, sc, SUNXI_TEST_SIZE/512, mwr_tsdat);
 	mmcdbg("Read test data\n");
-	sunxi_mmc_panic_read(sc, SUNXI_TEST_SIZE/512, rxbuf);
+	sunxi_mmc_panic_read(host, sc, SUNXI_TEST_SIZE/512, rxbuf);
 	buf_dumphex32("read data from mmc after write", rxbuf, SUNXI_TEST_SIZE);
 	if (memcmp(mwr_tsdat, rxbuf, SUNXI_TEST_SIZE) != 0) {
 		mmcinfo("write read failed\n");
@@ -997,7 +953,7 @@ sunxi_mmc_pancic_wrtest(struct device *dev, struct device_attribute *attr,
 	buf_dumphex32("0 test data", rxbuf, SUNXI_TEST_SIZE);;
 	sunxi_mmc_raw_half_read(reg, sc, SUNXI_TEST_SIZE/512, 160, rxbuf);
 	buf_dumphex32("half read data", rxbuf, SUNXI_TEST_SIZE);
-	sunxi_mmc_panic_read(sc, SUNXI_TEST_SIZE/512, rxbuf);
+	sunxi_mmc_panic_read(host, sc, SUNXI_TEST_SIZE/512, rxbuf);
 	buf_dumphex32("read test data", rxbuf, SUNXI_TEST_SIZE);
 	if (memcmp(mwr_tsdat, rxbuf, SUNXI_TEST_SIZE) != 0) {
 		mmcinfo("half read compare failed\n");
@@ -1009,19 +965,17 @@ sunxi_mmc_pancic_wrtest(struct device *dev, struct device_attribute *attr,
 	mmcinfo("\n***test half write***\n");
 	memset(rxbuf, 0, SUNXI_TEST_SIZE);
 	sunxi_mmc_raw_half_write(reg, sc, SUNXI_TEST_SIZE/512, 160, mwr_tsdat);
-	sunxi_mmc_panic_read(sc, SUNXI_TEST_SIZE/512, rxbuf);
+	sunxi_mmc_panic_read(host, sc, SUNXI_TEST_SIZE/512, rxbuf);
 	buf_dumphex32("read half test data", rxbuf, SUNXI_TEST_SIZE);
 	if (memcmp(mwr_tsdat, rxbuf, SUNXI_TEST_SIZE) != 0) {
 		mmcinfo("half write compare failed\n");
-		return count;
+		goto out;
 	}
 	mmcinfo("***test half write test ok***\n\n");
 #endif
 out:
-	sunxi_mmc_panic_exit();
 	mmc_release_host(mmc);
-
-
+free:
 	kfree(rxbuf);
 	kfree(mwr_tsdat);
 	return count;
@@ -1040,51 +994,88 @@ static ssize_t sunxi_mmc_panic_read_ps(const char *buf, sector_t start_sect,
 }
 */
 
+#if IS_BUILTIN(CONFIG_PSTORE_BLK) && IS_BUILTIN(CONFIG_MMC_SUNXI)	/* as include/linux/mmc/host.h */
 static int sunxi_mmc_panic_write_ps(const char *buf, sector_t sect_off,
 		sector_t sects)
 {
 	int ret;
 
+	if (!ps_host)
+		return -ENODEV;
 	if (sect_off + sects > blkdev_sects)
 		return -EOVERFLOW;
-	ret =  sunxi_mmc_panic_write(blkdev_start_sect + sect_off, sects, buf);
+	ret = sunxi_mmc_panic_write(ps_host, blkdev_start_sect + sect_off,
+				    sects, buf);
 	if (ret)
 		return ret;
 	return 0;
 }
 
-int sunxi_mmc_panic_init_ps(void *data)
+/*
+ * The device number of pstore/blk's partition (pstore_blk.blkdev) if it is on @card, else 0.
+ * Resolves the name as pstore/blk does when it is not a path to a device node.
+ */
+static dev_t sunxi_mmc_panic_blkdev_on(struct mmc_card *card)
 {
-	int ret = 0;
-	struct pstore_blk_info info = {};
+	struct pstore_blk_config conf;
+	struct gendisk *disk;
+	struct module *owner;
+	dev_t devt;
+	int partno;
+	bool on_card;
 
-	if (init_cnt) {
-		mmcdbg("error Has init sunxi mmc panic\n");
-		return MWR_RFAIL;
-	}
+	pstore_blk_get_config(&conf);
+	devt = name_to_dev_t(conf.device);
+	if (!devt)
+		return 0;
+	disk = get_gendisk(devt, &partno);
+	if (!disk)
+		return 0;
+	owner = disk->fops->owner;
+	on_card = disk_to_dev(disk)->parent == &card->dev;
+	/* get_gendisk() holds both the disk and its driver's module */
+	put_disk(disk);
+	module_put(owner);
+	return on_card ? devt : 0;
+}
+
+/*
+ * pstore/blk itself checks only the major number, which the eMMC and SD cards share, so the
+ * partition is checked to be on this card first. One card registers; later ones get -EBUSY.
+ */
+int sunxi_mmc_panic_init_ps(struct mmc_host *mmc)
+{
+	struct pstore_blk_info info = {};
+	dev_t devt;
+	int ret;
+
+	/* Unlocked: only the one card that holds the partition gets past the next check */
+	if (ps_host)
+		return -EBUSY;
+	devt = sunxi_mmc_panic_blkdev_on(mmc->card);
+	if (!devt)
+		return -ENODEV;
 
 	ret = sunxi_mmc_panic_init();
-	if (ret <= MWR_RFAIL)
+	if (ret)
 		return ret;
 
-	info.major = MMC_BLOCK_MAJOR;
-	info.flags = 0;
+	info.major = MAJOR(devt);
 	info.panic_write = sunxi_mmc_panic_write_ps;
 	ret = register_pstore_blk(&info);
-	if (ret == -ENODEV) {
-		info.major = BLOCK_EXT_MAJOR;
-		ret = register_pstore_blk(&info);
+	if (!ret && info.devt != devt) {
+		/* pstore/blk found another device by the same name (a device node in /dev) */
+		unregister_pstore_blk(info.major);
+		ret = -ENODEV;
 	}
-	if (ret)
-		goto exit_panic;
+	if (ret) {
+		mmcerr("%s: pstore/blk not attached: %d\n", mmc_hostname(mmc), ret);
+		return ret;
+	}
 
 	blkdev_sects = info.nr_sects;
 	blkdev_start_sect = info.start_sect;
-	init_cnt = 1;
-
+	ps_host = mmc_priv(mmc);
 	return 0;
-
-exit_panic:
-	sunxi_mmc_panic_exit();
-	return ret;
 }
+#endif

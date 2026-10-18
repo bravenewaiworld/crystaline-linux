@@ -584,4 +584,17 @@ static inline void mmc_retune_recheck(struct mmc_host *host)
 void mmc_retune_pause(struct mmc_host *host);
 void mmc_retune_unpause(struct mmc_host *host);
 
+/*
+ * Attaches pstore/blk to @mmc's card, with a panic-time writer, if pstore_blk.blkdev is a
+ * partition on that card (sunxi-mmc-panic.c). Caveat: @mmc is then taken to be a sunxi-mmc
+ * host (every MMC host on this board is), so the partition must not be on a card behind
+ * another host driver. Call after mmc_add_card(), with the host released: registering may
+ * read the partition.
+ */
+#if IS_BUILTIN(CONFIG_PSTORE_BLK) && IS_BUILTIN(CONFIG_MMC_SUNXI)
+int sunxi_mmc_panic_init_ps(struct mmc_host *mmc);
+#else
+static inline int sunxi_mmc_panic_init_ps(struct mmc_host *mmc) { return -ENODEV; }
+#endif
+
 #endif /* LINUX_MMC_HOST_H */
