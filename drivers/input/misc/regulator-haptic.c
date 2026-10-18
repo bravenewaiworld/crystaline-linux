@@ -188,6 +188,19 @@ static int regulator_haptic_probe(struct platform_device *pdev)
 		return PTR_ERR(haptic->regulator);
 	}
 
+	/*
+	 * An exclusive get counts a supply that is already on (left on by the bootloader) as enabled
+	 * by this driver. haptic->active starts false, so regulator_haptic_toggle() would never
+	 * disable it, and that count keeps the core from switching it off as unused: switch it off.
+	 */
+	if (regulator_is_enabled(haptic->regulator) > 0) {
+		error = regulator_disable(haptic->regulator);
+		if (error) {
+			dev_err(&pdev->dev, "failed to switch regulator off: %d\n", error);
+			return error;
+		}
+	}
+
 	input_dev = devm_input_allocate_device(&pdev->dev);
 	if (!input_dev)
 		return	-ENOMEM;
