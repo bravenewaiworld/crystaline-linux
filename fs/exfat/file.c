@@ -9,6 +9,7 @@
 #include <linux/buffer_head.h>
 #include <linux/blkdev.h>
 #include <linux/fsnotify.h>
+#include <linux/mount.h>
 #include <linux/security.h>
 #include <linux/msdos_fs.h>
 #include <linux/writeback.h>
@@ -89,14 +90,12 @@ free_clu:
 	return -EIO;
 }
 
-static bool exfat_allow_set_time(struct mnt_idmap *idmap,
-				 struct exfat_sb_info *sbi, struct inode *inode)
+static bool exfat_allow_set_time(struct exfat_sb_info *sbi, struct inode *inode)
 {
 	mode_t allow_utime = sbi->options.allow_utime;
 
-	if (!vfsuid_eq_kuid(i_uid_into_vfsuid(idmap, inode),
-			    current_fsuid())) {
-		if (vfsgid_in_group_p(i_gid_into_vfsgid(idmap, inode)))
+	if (!uid_eq(inode->i_uid, current_fsuid())) {
+		if (in_group_p(inode->i_gid))
 			allow_utime >>= 3;
 		if (allow_utime & MAY_WRITE)
 			return true;
@@ -265,24 +264,19 @@ write_size:
 	mutex_unlock(&sbi->s_lock);
 }
 
-int exfat_getattr(struct mnt_idmap *idmap, const struct path *path,
-		  struct kstat *stat, unsigned int request_mask,
-		  unsigned int query_flags)
+/* Creation time isn't reported: 4.9's stat has no field for it. */
+int exfat_getattr(struct vfsmount *mnt, struct dentry *dentry,
+		  struct kstat *stat)
 {
-	struct inode *inode = d_backing_inode(path->dentry);
-	struct exfat_inode_info *ei = EXFAT_I(inode);
+	struct inode *inode = d_backing_inode(dentry);
 
-	generic_fillattr(idmap, request_mask, inode, stat);
+	generic_fillattr(inode, stat);
 	exfat_truncate_atime(&stat->atime);
-	stat->result_mask |= STATX_BTIME;
-	stat->btime.tv_sec = ei->i_crtime.tv_sec;
-	stat->btime.tv_nsec = ei->i_crtime.tv_nsec;
 	stat->blksize = EXFAT_SB(inode->i_sb)->cluster_size;
 	return 0;
 }
 
-int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
-		  struct iattr *attr)
+int exfat_setattr(struct dentry *dentry, struct iattr *attr)
 {
 	struct exfat_sb_info *sbi = EXFAT_SB(dentry->d_sb);
 	struct inode *inode = dentry->d_inode;
@@ -303,22 +297,20 @@ int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	/* Check for setting the inode time. */
 	ia_valid = attr->ia_valid;
 	if ((ia_valid & (ATTR_MTIME_SET | ATTR_ATIME_SET | ATTR_TIMES_SET)) &&
-	    exfat_allow_set_time(idmap, sbi, inode)) {
+	    exfat_allow_set_time(sbi, inode)) {
 		attr->ia_valid &= ~(ATTR_MTIME_SET | ATTR_ATIME_SET |
 				ATTR_TIMES_SET);
 	}
 
-	error = setattr_prepare(idmap, dentry, attr);
+	error = setattr_prepare(dentry, attr);
 	attr->ia_valid = ia_valid;
 	if (error)
 		goto out;
 
 	if (((attr->ia_valid & ATTR_UID) &&
-	      (!uid_eq(from_vfsuid(idmap, i_user_ns(inode), attr->ia_vfsuid),
-	       sbi->options.fs_uid))) ||
+	      (!uid_eq(attr->ia_uid, sbi->options.fs_uid))) ||
 	    ((attr->ia_valid & ATTR_GID) &&
-	      (!gid_eq(from_vfsgid(idmap, i_user_ns(inode), attr->ia_vfsgid),
-	       sbi->options.fs_gid))) ||
+	      (!gid_eq(attr->ia_gid, sbi->options.fs_gid))) ||
 	    ((attr->ia_valid & ATTR_MODE) &&
 	     (attr->ia_mode & ~(S_IFREG | S_IFLNK | S_IFDIR | 0777)))) {
 		error = -EPERM;
@@ -337,7 +329,7 @@ int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (attr->ia_valid & ATTR_SIZE)
 		inode_set_mtime_to_ts(inode, inode_set_ctime_current(inode));
 
-	setattr_copy(idmap, inode, attr);
+	setattr_copy(inode, attr);
 	exfat_truncate_inode_atime(inode);
 
 	if (attr->ia_valid & ATTR_SIZE) {
@@ -427,13 +419,12 @@ static int exfat_ioctl_set_attributes(struct file *file, u32 __user *user_attr)
 	 * out the RO attribute for checking by the security
 	 * module, just because it maps to a file mode.
 	 */
-	err = security_inode_setattr(file_mnt_idmap(file),
-				     file->f_path.dentry, &ia);
+	err = security_inode_setattr(file->f_path.dentry, &ia);
 	if (err)
 		goto out_unlock_inode;
 
 	/* This MUST be done before doing anything irreversible... */
-	err = exfat_setattr(file_mnt_idmap(file), file->f_path.dentry, &ia);
+	err = exfat_setattr(file->f_path.dentry, &ia);
 	if (err)
 		goto out_unlock_inode;
 
@@ -598,21 +589,21 @@ static int exfat_extend_valid_size(struct inode *inode, loff_t new_valid_size)
 	pos = ei->valid_size;
 	while (pos < new_valid_size) {
 		u32 len;
-		struct folio *folio;
+		struct page *page;
 		unsigned long off;
 
 		len = PAGE_SIZE - (pos & (PAGE_SIZE - 1));
 		if (pos + len > new_valid_size)
 			len = new_valid_size - pos;
 
-		err = ops->write_begin(NULL, mapping, pos, len, &folio, NULL);
+		err = ops->write_begin(NULL, mapping, pos, len, 0, &page, NULL);
 		if (err)
 			goto out;
 
-		off = offset_in_folio(folio, pos);
-		folio_zero_new_buffers(folio, off, off + len);
+		off = offset_in_page(pos);
+		page_zero_new_buffers(page, off, off + len);
 
-		err = ops->write_end(NULL, mapping, pos, len, len, folio, NULL);
+		err = ops->write_end(NULL, mapping, pos, len, len, page, NULL);
 		if (err < 0)
 			goto out;
 		pos += len;
@@ -704,17 +695,24 @@ static ssize_t exfat_file_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	return generic_file_read_iter(iocb, iter);
 }
 
-static vm_fault_t exfat_page_mkwrite(struct vm_fault *vmf)
+static vm_fault_t exfat_page_mkwrite(struct vm_area_struct *vma,
+		struct vm_fault *vmf)
 {
 	int err;
-	struct vm_area_struct *vma = vmf->vma;
 	struct file *file = vma->vm_file;
 	struct inode *inode = file_inode(file);
 	struct exfat_inode_info *ei = EXFAT_I(inode);
 	loff_t start, end;
 
+	/*
+	 * Waiting for the inode lock here, under mmap_sem, could deadlock.
+	 * Linux 4.9 doesn't act on VM_FAULT_RETRY from page_mkwrite, so the
+	 * access faults again instead, until the lock holder lets go. A task
+	 * that holds the lock while faulting on such a page (an O_DIRECT read
+	 * of a file into its own shared mapping) spins until it is killed.
+	 */
 	if (!inode_trylock(inode))
-		return VM_FAULT_RETRY;
+		return VM_FAULT_NOPAGE;
 
 	start = ((loff_t)vma->vm_pgoff << PAGE_SHIFT);
 	end = min_t(loff_t, i_size_read(inode),
@@ -730,7 +728,7 @@ static vm_fault_t exfat_page_mkwrite(struct vm_fault *vmf)
 
 	inode_unlock(inode);
 
-	return filemap_page_mkwrite(vmf);
+	return filemap_page_mkwrite(vma, vmf);
 }
 
 static const struct vm_operations_struct exfat_file_vm_ops = {
@@ -739,15 +737,13 @@ static const struct vm_operations_struct exfat_file_vm_ops = {
 	.page_mkwrite	= exfat_page_mkwrite,
 };
 
-static int exfat_file_mmap_prepare(struct vm_area_desc *desc)
+static int exfat_file_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	struct file *file = desc->file;
-
-	if (unlikely(exfat_forced_shutdown(file_inode(desc->file)->i_sb)))
+	if (unlikely(exfat_forced_shutdown(file_inode(file)->i_sb)))
 		return -EIO;
 
 	file_accessed(file);
-	desc->vm_ops = &exfat_file_vm_ops;
+	vma->vm_ops = &exfat_file_vm_ops;
 	return 0;
 }
 
@@ -768,7 +764,7 @@ const struct file_operations exfat_file_operations = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = exfat_compat_ioctl,
 #endif
-	.mmap_prepare	= exfat_file_mmap_prepare,
+	.mmap		= exfat_file_mmap,
 	.fsync		= exfat_file_fsync,
 	.splice_read	= exfat_splice_read,
 	.splice_write	= iter_file_splice_write,

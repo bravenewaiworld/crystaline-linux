@@ -95,6 +95,21 @@ void exfat_set_entry_time(struct exfat_sb_info *sbi, struct timespec64 *ts,
 {
 	struct tm tm;
 	u16 t, d;
+	struct timespec64 in_range;
+
+	/*
+	 * Newer kernels clamp timestamps to what the filesystem can store
+	 * before they reach it; 4.9 doesn't, so clamp what goes on disk. The
+	 * inode in memory keeps the unclamped time until it is read back.
+	 */
+	if (ts->tv_sec < EXFAT_MIN_TIMESTAMP_SECS ||
+	    ts->tv_sec > EXFAT_MAX_TIMESTAMP_SECS) {
+		in_range.tv_sec = clamp_t(time64_t, ts->tv_sec,
+					  EXFAT_MIN_TIMESTAMP_SECS,
+					  EXFAT_MAX_TIMESTAMP_SECS);
+		in_range.tv_nsec = 0;
+		ts = &in_range;
+	}
 
 	time64_to_tm(ts->tv_sec, 0, &tm);
 	t = (tm.tm_hour << 11) | (tm.tm_min << 5) | (tm.tm_sec >> 1);

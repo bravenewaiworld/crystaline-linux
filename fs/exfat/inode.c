@@ -12,7 +12,6 @@
 #include <linux/writeback.h>
 #include <linux/uio.h>
 #include <linux/random.h>
-#include <linux/iversion.h>
 
 #include "exfat_raw.h"
 #include "exfat_fs.h"
@@ -312,13 +311,13 @@ static int exfat_get_block(struct inode *inode, sector_t iblock,
 	 * or new status as follows:
 	 *  1. i_size == valid_size
 	 *  2. write case (create == 1)
-	 *  3. direct_read (!bh_result->b_folio)
+	 *  3. direct_read (!bh_result->b_page)
 	 *     -> the unwritten part will be zeroed in exfat_direct_IO()
 	 *
 	 * Otherwise, in the case of buffered read, it is necessary to take
 	 * care the last nested block if valid_size is not equal to i_size.
 	 */
-	if (i_size == ei->valid_size || create || !bh_result->b_folio)
+	if (i_size == ei->valid_size || create || !bh_result->b_page)
 		valid_blks = EXFAT_B_TO_BLK_ROUND_UP(ei->valid_size, sb);
 	else
 		valid_blks = EXFAT_B_TO_BLK(ei->valid_size, sb);
@@ -346,7 +345,7 @@ static int exfat_get_block(struct inode *inode, sector_t iblock,
 	 * In that case, we should read and fill the unwritten part of
 	 * a block with zero.
 	 */
-	if (bh_result->b_folio && iblock == valid_blks &&
+	if (bh_result->b_page && iblock == valid_blks &&
 	    (ei->valid_size & (sb->s_blocksize - 1))) {
 		loff_t size, pos;
 		void *addr;
@@ -357,24 +356,23 @@ static int exfat_get_block(struct inode *inode, sector_t iblock,
 		 * No buffer_head is allocated.
 		 * (1) bmap: It's enough to set blocknr without I/O.
 		 * (2) read: The unwritten part should be filled with zero.
-		 *           If a folio does not have any buffers,
+		 *           If a page does not have any buffers,
 		 *           let's returns -EAGAIN to fallback to
-		 *           block_read_full_folio() for per-bh IO.
+		 *           block_read_full_page() for per-bh IO.
 		 */
-		if (!folio_buffers(bh_result->b_folio)) {
+		if (!page_has_buffers(bh_result->b_page)) {
 			err = -EAGAIN;
 			goto done;
 		}
 
 		pos = EXFAT_BLK_TO_B(iblock, sb);
 		size = ei->valid_size - pos;
-		addr = folio_address(bh_result->b_folio) +
-			offset_in_folio(bh_result->b_folio, pos);
+		addr = page_address(bh_result->b_page) + offset_in_page(pos);
 
-		/* Check if bh->b_data points to proper addr in folio */
+		/* Check if bh->b_data points to proper addr in page */
 		if (bh_result->b_data != addr) {
 			exfat_fs_error_ratelimit(sb,
-					"b_data(%p) != folio_addr(%p)",
+					"b_data(%p) != page_addr(%p)",
 					bh_result->b_data, addr);
 			err = -EINVAL;
 			goto done;
@@ -405,25 +403,46 @@ unlock_ret:
 	return err;
 }
 
-static int exfat_read_folio(struct file *file, struct folio *folio)
+static int exfat_readpage(struct file *file, struct page *page)
 {
-	return mpage_read_folio(folio, exfat_get_block);
+	return mpage_readpage(page, exfat_get_block);
 }
 
-static void exfat_readahead(struct readahead_control *rac)
+/*
+ * Returning without using the list makes the caller free its pages; readpage
+ * then reads them one at a time when they are needed.
+ */
+static int exfat_readpages(struct file *file, struct address_space *mapping,
+		struct list_head *pages, unsigned int nr_pages)
 {
-	struct address_space *mapping = rac->mapping;
 	struct inode *inode = mapping->host;
 	struct exfat_inode_info *ei = EXFAT_I(inode);
-	loff_t pos = readahead_pos(rac);
+	/* The list is in reverse file order and holds only pages not yet cached. */
+	loff_t pos = page_offset(list_last_entry(pages, struct page, lru));
+	loff_t end = page_offset(list_first_entry(pages, struct page, lru)) +
+		PAGE_SIZE;
 
 	/* Range cross valid_size, read it page by page. */
 	if (ei->valid_size < i_size_read(inode) &&
 	    pos <= ei->valid_size &&
-	    ei->valid_size < pos + readahead_length(rac))
-		return;
+	    ei->valid_size < end)
+		return 0;
 
-	mpage_readahead(rac, exfat_get_block);
+	return mpage_readpages(mapping, pages, nr_pages, exfat_get_block);
+}
+
+/*
+ * 4.9 writes single pages through this: page reclaim, and mpage_writepages()
+ * for a page it can't write itself.
+ */
+static int exfat_writepage(struct page *page, struct writeback_control *wbc)
+{
+	if (unlikely(exfat_forced_shutdown(page->mapping->host->i_sb))) {
+		unlock_page(page);
+		return -EIO;
+	}
+
+	return block_write_full_page(page, exfat_get_block, wbc);
 }
 
 static int exfat_writepages(struct address_space *mapping,
@@ -446,17 +465,17 @@ static void exfat_write_failed(struct address_space *mapping, loff_t to)
 	}
 }
 
-static int exfat_write_begin(const struct kiocb *iocb,
-			     struct address_space *mapping,
-			     loff_t pos, unsigned int len,
-			     struct folio **foliop, void **fsdata)
+static int exfat_write_begin(struct file *file, struct address_space *mapping,
+			     loff_t pos, unsigned int len, unsigned int flags,
+			     struct page **pagep, void **fsdata)
 {
 	int ret;
 
 	if (unlikely(exfat_forced_shutdown(mapping->host->i_sb)))
 		return -EIO;
 
-	ret = block_write_begin(mapping, pos, len, foliop, exfat_get_block);
+	ret = block_write_begin(mapping, pos, len, flags, pagep,
+				exfat_get_block);
 
 	if (ret < 0)
 		exfat_write_failed(mapping, pos+len);
@@ -464,16 +483,15 @@ static int exfat_write_begin(const struct kiocb *iocb,
 	return ret;
 }
 
-static int exfat_write_end(const struct kiocb *iocb,
-			   struct address_space *mapping,
+static int exfat_write_end(struct file *file, struct address_space *mapping,
 			   loff_t pos, unsigned int len, unsigned int copied,
-			   struct folio *folio, void *fsdata)
+			   struct page *page, void *fsdata)
 {
 	struct inode *inode = mapping->host;
 	struct exfat_inode_info *ei = EXFAT_I(inode);
 	int err;
 
-	err = generic_write_end(iocb, mapping, pos, len, copied, folio, fsdata);
+	err = generic_write_end(file, mapping, pos, len, copied, page, fsdata);
 	if (err < len)
 		exfat_write_failed(mapping, pos+len);
 
@@ -557,16 +575,15 @@ int exfat_block_truncate_page(struct inode *inode, loff_t from)
 }
 
 static const struct address_space_operations exfat_aops = {
-	.dirty_folio	= block_dirty_folio,
-	.invalidate_folio = block_invalidate_folio,
-	.read_folio	= exfat_read_folio,
-	.readahead	= exfat_readahead,
+	.readpage	= exfat_readpage,
+	.readpages	= exfat_readpages,
+	.writepage	= exfat_writepage,
 	.writepages	= exfat_writepages,
 	.write_begin	= exfat_write_begin,
 	.write_end	= exfat_write_end,
 	.direct_IO	= exfat_direct_IO,
 	.bmap		= exfat_aop_bmap,
-	.migrate_folio	= buffer_migrate_folio,
+	.migratepage	= buffer_migrate_page,
 };
 
 static inline unsigned long exfat_hash(loff_t i_pos)

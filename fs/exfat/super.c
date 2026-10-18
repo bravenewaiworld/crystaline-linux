@@ -3,9 +3,8 @@
  *  Copyright (C) 2012-2013 Samsung Electronics Co., Ltd.
  */
 
-#include <linux/fs_context.h>
-#include <linux/fs_parser.h>
 #include <linux/module.h>
+#include <linux/parser.h>
 #include <linux/init.h>
 #include <linux/time.h>
 #include <linux/mount.h>
@@ -14,7 +13,6 @@
 #include <linux/seq_file.h>
 #include <linux/blkdev.h>
 #include <linux/fs_struct.h>
-#include <linux/iversion.h>
 #include <linux/nls.h>
 #include <linux/buffer_head.h>
 #include <linux/magic.h>
@@ -182,11 +180,6 @@ int exfat_force_shutdown(struct super_block *sb, u32 flags)
 	return 0;
 }
 
-static void exfat_shutdown(struct super_block *sb)
-{
-	exfat_force_shutdown(sb, EXFAT_GOING_DOWN_NOSYNC);
-}
-
 static struct inode *exfat_alloc_inode(struct super_block *sb)
 {
 	struct exfat_inode_info *ei;
@@ -204,15 +197,28 @@ static void exfat_free_inode(struct inode *inode)
 	kmem_cache_free(exfat_inode_cachep, EXFAT_I(inode));
 }
 
+static void exfat_free_inode_rcu(struct rcu_head *head)
+{
+	exfat_free_inode(container_of(head, struct inode, i_rcu));
+}
+
+/* Lookups walking the dentry cache under RCU may still read the inode. */
+static void exfat_destroy_inode(struct inode *inode)
+{
+	call_rcu(&inode->i_rcu, exfat_free_inode_rcu);
+}
+
+static int exfat_remount(struct super_block *sb, int *flags, char *data);
+
 static const struct super_operations exfat_sops = {
 	.alloc_inode	= exfat_alloc_inode,
-	.free_inode	= exfat_free_inode,
+	.destroy_inode	= exfat_destroy_inode,
 	.write_inode	= exfat_write_inode,
 	.evict_inode	= exfat_evict_inode,
 	.put_super	= exfat_put_super,
 	.statfs		= exfat_statfs,
+	.remount_fs	= exfat_remount,
 	.show_options	= exfat_show_options,
-	.shutdown	= exfat_shutdown,
 };
 
 enum {
@@ -223,93 +229,116 @@ enum {
 	Opt_fmask,
 	Opt_allow_utime,
 	Opt_charset,
-	Opt_errors,
+	Opt_errors_cont,
+	Opt_errors_panic,
+	Opt_errors_ro,
 	Opt_discard,
+	Opt_nodiscard,
 	Opt_keep_last_dots,
 	Opt_sys_tz,
 	Opt_time_offset,
 	Opt_zero_size_dir,
+	Opt_nozero_size_dir,
 
 	/* Deprecated options */
 	Opt_utf8,
 	Opt_debug,
 	Opt_namecase,
 	Opt_codepage,
+
+	Opt_err,
 };
 
-static const struct constant_table exfat_param_enums[] = {
-	{ "continue",		EXFAT_ERRORS_CONT },
-	{ "panic",		EXFAT_ERRORS_PANIC },
-	{ "remount-ro",		EXFAT_ERRORS_RO },
-	{}
+static const match_table_t exfat_tokens = {
+	{Opt_uid,		"uid=%u"},
+	{Opt_gid,		"gid=%u"},
+	{Opt_umask,		"umask=%o"},
+	{Opt_dmask,		"dmask=%o"},
+	{Opt_fmask,		"fmask=%o"},
+	{Opt_allow_utime,	"allow_utime=%o"},
+	{Opt_charset,		"iocharset=%s"},
+	{Opt_errors_cont,	"errors=continue"},
+	{Opt_errors_panic,	"errors=panic"},
+	{Opt_errors_ro,		"errors=remount-ro"},
+	{Opt_discard,		"discard"},
+	{Opt_nodiscard,		"nodiscard"},
+	{Opt_keep_last_dots,	"keep_last_dots"},
+	{Opt_sys_tz,		"sys_tz"},
+	{Opt_time_offset,	"time_offset=%d"},
+	{Opt_zero_size_dir,	"zero_size_dir"},
+	{Opt_nozero_size_dir,	"nozero_size_dir"},
+	{Opt_utf8,		"utf8"},
+	{Opt_debug,		"debug"},
+	{Opt_namecase,		"namecase=%u"},
+	{Opt_codepage,		"codepage=%u"},
+	{Opt_err,		NULL},
 };
 
-static const struct fs_parameter_spec exfat_parameters[] = {
-	fsparam_uid("uid",			Opt_uid),
-	fsparam_gid("gid",			Opt_gid),
-	fsparam_u32oct("umask",			Opt_umask),
-	fsparam_u32oct("dmask",			Opt_dmask),
-	fsparam_u32oct("fmask",			Opt_fmask),
-	fsparam_u32oct("allow_utime",		Opt_allow_utime),
-	fsparam_string("iocharset",		Opt_charset),
-	fsparam_enum("errors",			Opt_errors, exfat_param_enums),
-	fsparam_flag_no("discard",		Opt_discard),
-	fsparam_flag("keep_last_dots",		Opt_keep_last_dots),
-	fsparam_flag("sys_tz",			Opt_sys_tz),
-	fsparam_s32("time_offset",		Opt_time_offset),
-	fsparam_flag_no("zero_size_dir",	Opt_zero_size_dir),
-	__fsparam(NULL, "utf8",			Opt_utf8, fs_param_deprecated,
-		  NULL),
-	__fsparam(NULL, "debug",		Opt_debug, fs_param_deprecated,
-		  NULL),
-	__fsparam(fs_param_is_u32, "namecase",	Opt_namecase,
-		  fs_param_deprecated, NULL),
-	__fsparam(fs_param_is_u32, "codepage",	Opt_codepage,
-		  fs_param_deprecated, NULL),
-	{}
-};
-
-static int exfat_parse_param(struct fs_context *fc, struct fs_parameter *param)
+static int exfat_parse_param(struct super_block *sb, struct exfat_sb_info *sbi,
+		char *param)
 {
-	struct exfat_sb_info *sbi = fc->s_fs_info;
 	struct exfat_mount_options *opts = &sbi->options;
-	struct fs_parse_result result;
-	int opt;
+	substring_t args[MAX_OPT_ARGS];
+	char *iocharset;
+	int opt, n;
 
-	opt = fs_parse(fc, exfat_parameters, param, &result);
-	if (opt < 0)
-		return opt;
+	opt = match_token(param, exfat_tokens, args);
 
 	switch (opt) {
 	case Opt_uid:
-		opts->fs_uid = result.uid;
+		if (match_int(&args[0], &n))
+			return -EINVAL;
+		opts->fs_uid = make_kuid(current_user_ns(), n);
+		if (!uid_valid(opts->fs_uid))
+			return -EINVAL;
 		break;
 	case Opt_gid:
-		opts->fs_gid = result.gid;
+		if (match_int(&args[0], &n))
+			return -EINVAL;
+		opts->fs_gid = make_kgid(current_user_ns(), n);
+		if (!gid_valid(opts->fs_gid))
+			return -EINVAL;
 		break;
 	case Opt_umask:
-		opts->fs_fmask = result.uint_32;
-		opts->fs_dmask = result.uint_32;
+		if (match_octal(&args[0], &n))
+			return -EINVAL;
+		opts->fs_fmask = n;
+		opts->fs_dmask = n;
 		break;
 	case Opt_dmask:
-		opts->fs_dmask = result.uint_32;
+		if (match_octal(&args[0], &n))
+			return -EINVAL;
+		opts->fs_dmask = n;
 		break;
 	case Opt_fmask:
-		opts->fs_fmask = result.uint_32;
+		if (match_octal(&args[0], &n))
+			return -EINVAL;
+		opts->fs_fmask = n;
 		break;
 	case Opt_allow_utime:
-		opts->allow_utime = result.uint_32 & 0022;
+		if (match_octal(&args[0], &n))
+			return -EINVAL;
+		opts->allow_utime = n & 0022;
 		break;
 	case Opt_charset:
+		iocharset = match_strdup(&args[0]);
+		if (!iocharset)
+			return -ENOMEM;
 		exfat_free_iocharset(sbi);
-		exfat_set_iocharset(opts, param->string);
-		param->string = NULL;
+		exfat_set_iocharset(opts, iocharset);
 		break;
-	case Opt_errors:
-		opts->errors = result.uint_32;
+	case Opt_errors_cont:
+		opts->errors = EXFAT_ERRORS_CONT;
+		break;
+	case Opt_errors_panic:
+		opts->errors = EXFAT_ERRORS_PANIC;
+		break;
+	case Opt_errors_ro:
+		opts->errors = EXFAT_ERRORS_RO;
 		break;
 	case Opt_discard:
-		opts->discard = !result.negated;
+	case Opt_nodiscard:
+		opts->discard = opt == Opt_discard;
 		break;
 	case Opt_keep_last_dots:
 		opts->keep_last_dots = 1;
@@ -318,16 +347,19 @@ static int exfat_parse_param(struct fs_context *fc, struct fs_parameter *param)
 		opts->sys_tz = 1;
 		break;
 	case Opt_time_offset:
+		if (match_int(&args[0], &n))
+			return -EINVAL;
 		/*
 		 * Make the limit 24 just in case someone invents something
 		 * unusual.
 		 */
-		if (result.int_32 < -24 * 60 || result.int_32 > 24 * 60)
+		if (n < -24 * 60 || n > 24 * 60)
 			return -EINVAL;
-		opts->time_offset = result.int_32;
+		opts->time_offset = n;
 		break;
 	case Opt_zero_size_dir:
-		opts->zero_size_dir = !result.negated;
+	case Opt_nozero_size_dir:
+		opts->zero_size_dir = opt == Opt_zero_size_dir;
 		break;
 	case Opt_utf8:
 	case Opt_debug:
@@ -335,9 +367,28 @@ static int exfat_parse_param(struct fs_context *fc, struct fs_parameter *param)
 	case Opt_codepage:
 		break;
 	default:
+		exfat_err(sb, "unrecognized mount option \"%s\" or missing value",
+			  param);
 		return -EINVAL;
 	}
 
+	return 0;
+}
+
+/* Parses a comma-separated mount option string, which may be NULL. */
+static int exfat_parse_options(struct super_block *sb,
+		struct exfat_sb_info *sbi, char *options)
+{
+	char *p;
+	int err;
+
+	while ((p = strsep(&options, ",")) != NULL) {
+		if (!*p)
+			continue;
+		err = exfat_parse_param(sb, sbi, p);
+		if (err)
+			return err;
+	}
 	return 0;
 }
 
@@ -644,13 +695,26 @@ free_bh:
 	return ret;
 }
 
-static int exfat_fill_super(struct super_block *sb, struct fs_context *fc)
+static struct exfat_sb_info *exfat_alloc_sbi(struct super_block *remount_sb);
+
+static int exfat_fill_super(struct super_block *sb, void *data, int silent)
 {
-	struct exfat_sb_info *sbi = sb->s_fs_info;
-	struct exfat_mount_options *opts = &sbi->options;
+	struct exfat_sb_info *sbi;
+	struct exfat_mount_options *opts;
 	struct inode *root_inode;
 	struct exfat_chain root_clu;
 	int err;
+
+	/* exfat_kill_sb() frees it, also when mounting fails. */
+	sbi = exfat_alloc_sbi(NULL);
+	if (!sbi)
+		return -ENOMEM;
+	sb->s_fs_info = sbi;
+	opts = &sbi->options;
+
+	err = exfat_parse_options(sb, sbi, data);
+	if (err)
+		return err;
 
 	if (opts->allow_utime == (unsigned short)-1)
 		opts->allow_utime = ~opts->fs_dmask & 0022;
@@ -665,8 +729,6 @@ static int exfat_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_op = &exfat_sops;
 
 	sb->s_time_gran = 10 * NSEC_PER_MSEC;
-	sb->s_time_min = EXFAT_MIN_TIMESTAMP_SECS;
-	sb->s_time_max = EXFAT_MAX_TIMESTAMP_SECS;
 
 	err = __exfat_fill_super(sb, &root_clu);
 	if (err) {
@@ -729,9 +791,10 @@ check_nls_io:
 	return err;
 }
 
-static int exfat_get_tree(struct fs_context *fc)
+static struct dentry *exfat_mount(struct file_system_type *fs_type,
+		int flags, const char *dev_name, void *data)
 {
-	return get_tree_bdev(fc, exfat_fill_super);
+	return mount_bdev(fs_type, flags, dev_name, data, exfat_fill_super);
 }
 
 static void exfat_free_sbi(struct exfat_sb_info *sbi)
@@ -740,23 +803,30 @@ static void exfat_free_sbi(struct exfat_sb_info *sbi)
 	kfree(sbi);
 }
 
-static void exfat_free(struct fs_context *fc)
+/*
+ * Options left out of a remount take their default values, as at mount time,
+ * except uid, gid, fmask and dmask, which are kept. So a remount must repeat
+ * iocharset, keep_last_dots, sys_tz, time_offset and allow_utime if they were
+ * set (it fails otherwise); errors= and discard silently revert.
+ */
+static int exfat_remount(struct super_block *sb, int *flags, char *data)
 {
-	struct exfat_sb_info *sbi = fc->s_fs_info;
-
-	if (sbi)
-		exfat_free_sbi(sbi);
-}
-
-static int exfat_reconfigure(struct fs_context *fc)
-{
-	struct super_block *sb = fc->root->d_sb;
-	struct exfat_sb_info *remount_sbi = fc->s_fs_info;
+	struct exfat_sb_info *remount_sbi;
 	struct exfat_sb_info *sbi = EXFAT_SB(sb);
-	struct exfat_mount_options *new_opts = &remount_sbi->options;
+	struct exfat_mount_options *new_opts;
 	struct exfat_mount_options *cur_opts = &sbi->options;
+	int err;
 
-	fc->sb_flags |= SB_NODIRATIME;
+	remount_sbi = exfat_alloc_sbi(sb);
+	if (!remount_sbi)
+		return -ENOMEM;
+	new_opts = &remount_sbi->options;
+
+	err = exfat_parse_options(sb, remount_sbi, data);
+	if (err)
+		goto out;
+
+	*flags |= SB_NODIRATIME;
 
 	sync_filesystem(sb);
 	mutex_lock(&sbi->s_lock);
@@ -778,44 +848,46 @@ static int exfat_reconfigure(struct fs_context *fc)
 	    !gid_eq(new_opts->fs_gid, cur_opts->fs_gid) ||
 	    new_opts->fs_fmask != cur_opts->fs_fmask ||
 	    new_opts->fs_dmask != cur_opts->fs_dmask ||
-	    new_opts->allow_utime != cur_opts->allow_utime)
-		return -EINVAL;
+	    new_opts->allow_utime != cur_opts->allow_utime) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	if (new_opts->discard != cur_opts->discard &&
 	    new_opts->discard &&
 	    !bdev_max_discard_sectors(sb->s_bdev)) {
 		exfat_warn(sb, "remounting with \"discard\" option, but the device does not support discard");
-		return -EINVAL;
+		err = -EINVAL;
+		goto out;
 	}
 
 	swap(*cur_opts, *new_opts);
 
-	return 0;
+out:
+	exfat_free_sbi(remount_sbi);
+	return err;
 }
 
-static const struct fs_context_operations exfat_context_ops = {
-	.parse_param	= exfat_parse_param,
-	.get_tree	= exfat_get_tree,
-	.free		= exfat_free,
-	.reconfigure	= exfat_reconfigure,
-};
-
-static int exfat_init_fs_context(struct fs_context *fc)
+/*
+ * Allocates superblock info with default options; for a remount (remount_sb
+ * set), uid, gid and the masks are taken from the mounted filesystem.
+ */
+static struct exfat_sb_info *exfat_alloc_sbi(struct super_block *remount_sb)
 {
 	struct exfat_sb_info *sbi;
 
 	sbi = kzalloc(sizeof(struct exfat_sb_info), GFP_KERNEL);
 	if (!sbi)
-		return -ENOMEM;
+		return NULL;
 
 	mutex_init(&sbi->s_lock);
 	mutex_init(&sbi->bitmap_lock);
 	ratelimit_state_init(&sbi->ratelimit, DEFAULT_RATELIMIT_INTERVAL,
 			DEFAULT_RATELIMIT_BURST);
 
-	if (fc->purpose == FS_CONTEXT_FOR_RECONFIGURE && fc->root) {
-		struct super_block *sb = fc->root->d_sb;
-		struct exfat_mount_options *cur_opts = &EXFAT_SB(sb)->options;
+	if (remount_sb) {
+		struct exfat_mount_options *cur_opts =
+			&EXFAT_SB(remount_sb)->options;
 
 		sbi->options.fs_uid = cur_opts->fs_uid;
 		sbi->options.fs_gid = cur_opts->fs_gid;
@@ -831,10 +903,7 @@ static int exfat_init_fs_context(struct fs_context *fc)
 	sbi->options.allow_utime = -1;
 	sbi->options.errors = EXFAT_ERRORS_RO;
 	exfat_set_iocharset(&sbi->options, exfat_default_iocharset);
-
-	fc->s_fs_info = sbi;
-	fc->ops = &exfat_context_ops;
-	return 0;
+	return sbi;
 }
 
 static void delayed_free(struct rcu_head *p)
@@ -858,10 +927,9 @@ static void exfat_kill_sb(struct super_block *sb)
 static struct file_system_type exfat_fs_type = {
 	.owner			= THIS_MODULE,
 	.name			= "exfat",
-	.init_fs_context	= exfat_init_fs_context,
-	.parameters		= exfat_parameters,
+	.mount			= exfat_mount,
 	.kill_sb		= exfat_kill_sb,
-	.fs_flags		= FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
+	.fs_flags		= FS_REQUIRES_DEV,
 };
 
 static void exfat_inode_init_once(void *foo)

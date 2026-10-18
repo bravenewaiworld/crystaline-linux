@@ -288,11 +288,11 @@ out:
 	return err;
 }
 
-WRAP_DIR_ITER(exfat_iterate) // FIXME!
 const struct file_operations exfat_dir_operations = {
 	.llseek		= generic_file_llseek,
 	.read		= generic_read_dir,
-	.iterate_shared	= shared_exfat_iterate,
+	/* With the directory locked exclusively, as upstream's WRAP_DIR_ITER. */
+	.iterate	= exfat_iterate,
 	.unlocked_ioctl = exfat_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = exfat_compat_ioctl,
@@ -927,7 +927,7 @@ err_used_follow_unused:
 
 	exfat_fs_error(es->sb,
 		"in sector %lld, dentry %d should be unused, but 0x%x",
-		bh->b_blocknr, off >> DENTRY_SIZE_BITS, ep->type);
+		(u64)bh->b_blocknr, off >> DENTRY_SIZE_BITS, ep->type);
 
 	return -EIO;
 

@@ -3,7 +3,6 @@
  * Copyright (C) 2012-2013 Samsung Electronics Co., Ltd.
  */
 
-#include <linux/iversion.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
 #include <linux/buffer_head.h>
@@ -31,9 +30,10 @@ static inline void exfat_d_version_set(struct dentry *dentry,
  * If it happened, the negative dentry isn't actually negative anymore.  So,
  * drop it.
  */
-static int exfat_d_revalidate(struct inode *dir, const struct qstr *name,
-			      struct dentry *dentry, unsigned int flags)
+static int exfat_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
+	int ret;
+
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
@@ -57,7 +57,12 @@ static int exfat_d_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & (LOOKUP_CREATE | LOOKUP_RENAME_TARGET))
 		return 0;
 
-	return inode_eq_iversion(dir, exfat_d_version(dentry));
+	/* d_lock keeps d_parent from changing while it is read. */
+	spin_lock(&dentry->d_lock);
+	ret = inode_eq_iversion(d_inode(dentry->d_parent),
+			exfat_d_version(dentry));
+	spin_unlock(&dentry->d_lock);
+	return ret;
 }
 
 /* returns the length of a struct qstr, ignoring trailing dots if necessary */
@@ -542,8 +547,8 @@ out:
 	return ret;
 }
 
-static int exfat_create(struct mnt_idmap *idmap, struct inode *dir,
-			struct dentry *dentry, umode_t mode, bool excl)
+static int exfat_create(struct inode *dir, struct dentry *dentry, umode_t mode,
+			bool excl)
 {
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode;
@@ -844,8 +849,7 @@ unlock:
 	return err;
 }
 
-static struct dentry *exfat_mkdir(struct mnt_idmap *idmap, struct inode *dir,
-				  struct dentry *dentry, umode_t mode)
+static int exfat_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	struct super_block *sb = dir->i_sb;
 	struct inode *inode;
@@ -855,7 +859,7 @@ static struct dentry *exfat_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 	loff_t size = i_size_read(dir);
 
 	if (unlikely(exfat_forced_shutdown(sb)))
-		return ERR_PTR(-EIO);
+		return -EIO;
 
 	mutex_lock(&EXFAT_SB(sb)->s_lock);
 	exfat_set_volume_dirty(sb);
@@ -886,7 +890,7 @@ static struct dentry *exfat_mkdir(struct mnt_idmap *idmap, struct inode *dir,
 
 unlock:
 	mutex_unlock(&EXFAT_SB(sb)->s_lock);
-	return ERR_PTR(err);
+	return err;
 }
 
 static int exfat_check_dir_empty(struct super_block *sb,
@@ -1288,8 +1292,7 @@ out:
 	return ret;
 }
 
-static int exfat_rename(struct mnt_idmap *idmap,
-			struct inode *old_dir, struct dentry *old_dentry,
+static int exfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 			struct inode *new_dir, struct dentry *new_dentry,
 			unsigned int flags)
 {

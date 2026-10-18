@@ -10,7 +10,7 @@
 #include <linux/ratelimit.h>
 #include <linux/nls.h>
 #include <linux/blkdev.h>
-#include <uapi/linux/exfat.h>
+#include "compat.h"
 
 #define EXFAT_ROOT_INO		1
 
@@ -462,11 +462,9 @@ int exfat_trim_fs(struct inode *inode, struct fstrim_range *range);
 extern const struct file_operations exfat_file_operations;
 int __exfat_truncate(struct inode *inode);
 void exfat_truncate(struct inode *inode);
-int exfat_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
-		  struct iattr *attr);
-int exfat_getattr(struct mnt_idmap *idmap, const struct path *path,
-		  struct kstat *stat, unsigned int request_mask,
-		  unsigned int query_flags);
+int exfat_setattr(struct dentry *dentry, struct iattr *attr);
+int exfat_getattr(struct vfsmount *mnt, struct dentry *dentry,
+		  struct kstat *stat);
 int exfat_file_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 long exfat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 long exfat_compat_ioctl(struct file *filp, unsigned int cmd,
