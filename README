@@ -1,3 +1,11 @@
+Crystaline Linux
+
+The kernel of Crystaline OS (https://github.com/bravenewaiworld/crystaline-os).
+A fork of PocketForge's kernel-tsp (https://github.com/pocketforge-os/kernel-tsp): Allwinner's
+4.9 vendor kernel, with our changes for the TrimUI Brick on the `brick` branch.
+
+----
+
         Linux kernel release 4.x <http://kernel.org/>
 
 These are the release notes for Linux version 4.  Read them carefully,
