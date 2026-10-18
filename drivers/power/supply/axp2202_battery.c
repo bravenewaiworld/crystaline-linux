@@ -13,7 +13,6 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
@@ -27,17 +26,8 @@
 #define AXP2202_MODEL_MAX_LEN		512	/* battery model blob size */
 #define AXP2202_NTC_POINTS		16
 #define AXP2202_MONITOR_INTERVAL	msecs_to_jiffies(10 * 1000)
-#define AXP2202_SMOOTH_INTERVAL		msecs_to_jiffies(30 * 1000)
 /* Reported temperature limit when there is no NTC, in 0.1 degC */
 #define AXP2202_NO_NTC_LIMIT		200000
-
-/*
- * SOC smoothing: after a gauge reset the driver reports a SOC that climbs
- * slowly towards the gauge's, and keeps it in AXP2202_CURVE_CHECK so that it
- * survives reboots. Bit 7 = smoothing active, bits 6:0 = SOC to report.
- */
-#define AXP2202_CURVE_ACTIVE		BIT(7)
-#define AXP2202_CURVE_SOC		GENMASK(6, 0)
 
 /*
  * Gauge memory is read indirectly: write an address to AXP2202_GAUGE_FG_ADDR,
@@ -109,8 +99,6 @@ struct axp2202_bat_power {
 	struct power_supply *bat_supply;
 	struct axp2202_bat_config cfg;
 	struct delayed_work monitor_work;
-	struct delayed_work curve_work;
-	struct wakeup_source *curve_ws;
 	/* virqs to disable during suspend, 0 for the others */
 	int sleep_irqs[ARRAY_SIZE(axp2202_bat_irqs)];
 };
@@ -321,7 +309,7 @@ static int axp2202_get_bat_status(struct axp2202_bat_power *bat_power,
 
 	/*
 	 * With VBUS present, report full once the gauge reads 100%, even if
-	 * the charger is still in CV. This ignores SOC smoothing.
+	 * the charger is still in CV.
 	 */
 	ret = regmap_read(regmap, AXP2202_COMM_STAT0, &data);
 	if (ret < 0)
@@ -344,15 +332,7 @@ static int axp2202_get_soc(struct axp2202_bat_power *bat_power, int *soc)
 	unsigned int data;
 	int ret, status;
 
-	ret = regmap_read(regmap, AXP2202_CURVE_CHECK, &data);
-	if (ret < 0)
-		return ret;
-
-	/* report the smoothed SOC while smoothing is active */
-	if (data & AXP2202_CURVE_ACTIVE)
-		data &= AXP2202_CURVE_SOC;
-	else
-		ret = regmap_read(regmap, AXP2202_GAUGE_SOC, &data);
+	ret = regmap_read(regmap, AXP2202_GAUGE_SOC, &data);
 	if (ret < 0)
 		return ret;
 
@@ -626,9 +606,6 @@ static int axp2202_load_model(struct axp2202_bat_power *bat_power)
 		goto out;
 	}
 
-	/* cancel SOC smoothing; it tracked the previous model */
-	regmap_write(regmap, AXP2202_CURVE_CHECK, 0);
-
 	ret = axp2202_rewind_model(regmap);
 	if (ret < 0)
 		goto out_reset;
@@ -842,10 +819,7 @@ static int axp2202_init_chip(struct axp2202_bat_power *bat_power)
 
 	/*
 	 * Gauge SOC above 60% but VBAT below 3.5 V while charging means the
-	 * gauge is wrong: restart it and report a smoothed SOC that climbs
-	 * from 1% (see axp2202_curve_work). With VBAT >= 3.5 V the gauge is
-	 * plausible, so cancel any smoothing left from a previous boot. At
-	 * 60% or below, smoothing state is left alone.
+	 * gauge is wrong: restart it so that it estimates the SOC afresh.
 	 */
 	ret = regmap_read(regmap, AXP2202_GAUGE_SOC, &val);
 	if (ret < 0)
@@ -855,16 +829,12 @@ static int axp2202_init_chip(struct axp2202_bat_power *bat_power)
 				       &val);
 		if (ret < 0)
 			return ret;
-		if (val >= 3500) {
-			regmap_write(regmap, AXP2202_CURVE_CHECK, 0);
-		} else if (!axp2202_get_bat_status(bat_power, &status) &&
-			   status == POWER_SUPPLY_STATUS_CHARGING) {
+		if (val < 3500 && !axp2202_get_bat_status(bat_power, &status) &&
+		    status == POWER_SUPPLY_STATUS_CHARGING) {
 			dev_warn(bat_power->dev,
 				 "SOC too high for %u mV, resetting gauge\n",
 				 val);
 			axp2202_reset_gauge(bat_power);
-			regmap_write(regmap, AXP2202_CURVE_CHECK,
-				     AXP2202_CURVE_ACTIVE | 1);
 		}
 	}
 
@@ -954,46 +924,11 @@ static void axp2202_monitor_work(struct work_struct *work)
 			      AXP2202_MONITOR_INTERVAL);
 }
 
-/*
- * Raises the smoothed SOC by 1% per interval while VBUS is present. Ends
- * once the gauge SOC is no longer above it, at which point the reported
- * SOC jumps to the gauge's. On battery the smoothed SOC stays frozen.
- * A wakeup source is held throughout.
- */
-static void axp2202_curve_work(struct work_struct *work)
-{
-	struct axp2202_bat_power *bat_power =
-		container_of(work, struct axp2202_bat_power, curve_work.work);
-	struct regmap *regmap = bat_power->regmap;
-	unsigned int curve, soc, stat0;
-
-	power_supply_changed(bat_power->bat_supply);
-
-	if (regmap_read(regmap, AXP2202_CURVE_CHECK, &curve) ||
-	    regmap_read(regmap, AXP2202_GAUGE_SOC, &soc) ||
-	    !(curve & AXP2202_CURVE_ACTIVE) ||
-	    min(soc, 100U) <= (curve & AXP2202_CURVE_SOC)) {
-		dev_dbg(bat_power->dev, "SOC smoothing done\n");
-		regmap_write(regmap, AXP2202_CURVE_CHECK, 0);
-		__pm_relax(bat_power->curve_ws);
-		return;
-	}
-
-	if (!regmap_read(regmap, AXP2202_COMM_STAT0, &stat0) &&
-	    (stat0 & AXP2202_VBUS_GOOD))
-		regmap_update_bits(regmap, AXP2202_CURVE_CHECK,
-				   AXP2202_CURVE_SOC,
-				   (curve & AXP2202_CURVE_SOC) + 1);
-
-	schedule_delayed_work(&bat_power->curve_work, AXP2202_SMOOTH_INTERVAL);
-}
-
 static int axp2202_battery_probe(struct platform_device *pdev)
 {
 	struct axp20x_dev *axp_dev = dev_get_drvdata(pdev->dev.parent);
 	struct power_supply_config psy_cfg = {};
 	struct axp2202_bat_power *bat_power;
-	unsigned int curve;
 	int i, irq, ret;
 
 	/* The MFD core creates this device even if its DT node is disabled. */
@@ -1013,7 +948,6 @@ static int axp2202_battery_probe(struct platform_device *pdev)
 	bat_power->regmap = axp_dev->regmap;
 	platform_set_drvdata(pdev, bat_power);
 	INIT_DELAYED_WORK(&bat_power->monitor_work, axp2202_monitor_work);
-	INIT_DELAYED_WORK(&bat_power->curve_work, axp2202_curve_work);
 
 	axp2202_bat_parse_dt(bat_power);
 
@@ -1055,18 +989,6 @@ static int axp2202_battery_probe(struct platform_device *pdev)
 			bat_power->sleep_irqs[i] = irq;
 	}
 
-	/* smoothing state survives reboots; resume it if active */
-	ret = regmap_read(bat_power->regmap, AXP2202_CURVE_CHECK, &curve);
-	if (ret < 0)
-		return ret;
-	if (curve & AXP2202_CURVE_ACTIVE) {
-		bat_power->curve_ws =
-			wakeup_source_register("bat_curve_smooth");
-		__pm_stay_awake(bat_power->curve_ws);
-		schedule_delayed_work(&bat_power->curve_work,
-				      AXP2202_SMOOTH_INTERVAL);
-	}
-
 	schedule_delayed_work(&bat_power->monitor_work, msecs_to_jiffies(500));
 
 	return 0;
@@ -1077,8 +999,6 @@ static int axp2202_battery_remove(struct platform_device *pdev)
 	struct axp2202_bat_power *bat_power = platform_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&bat_power->monitor_work);
-	cancel_delayed_work_sync(&bat_power->curve_work);
-	wakeup_source_unregister(bat_power->curve_ws);
 
 	return 0;
 }
@@ -1089,7 +1009,6 @@ static void axp2202_battery_shutdown(struct platform_device *pdev)
 	struct axp2202_bat_power *bat_power = platform_get_drvdata(pdev);
 
 	cancel_delayed_work_sync(&bat_power->monitor_work);
-	cancel_delayed_work_sync(&bat_power->curve_work);
 	axp2202_set_ichg(bat_power, bat_power->cfg.pmu_shutdown_chgcur);
 }
 
@@ -1114,7 +1033,6 @@ static int axp2202_battery_suspend(struct device *dev)
 	struct axp2202_bat_power *bat_power = dev_get_drvdata(dev);
 
 	cancel_delayed_work_sync(&bat_power->monitor_work);
-	cancel_delayed_work_sync(&bat_power->curve_work);
 	axp2202_set_ichg(bat_power, bat_power->cfg.pmu_suspend_chgcur);
 	axp2202_bat_set_irqs(bat_power, false);
 
@@ -1124,15 +1042,10 @@ static int axp2202_battery_suspend(struct device *dev)
 static int axp2202_battery_resume(struct device *dev)
 {
 	struct axp2202_bat_power *bat_power = dev_get_drvdata(dev);
-	unsigned int curve;
 
 	axp2202_bat_set_irqs(bat_power, true);
 	axp2202_set_ichg(bat_power, bat_power->cfg.pmu_runtime_chgcur);
 	schedule_delayed_work(&bat_power->monitor_work, 0);
-	if (bat_power->curve_ws &&
-	    !regmap_read(bat_power->regmap, AXP2202_CURVE_CHECK, &curve) &&
-	    (curve & AXP2202_CURVE_ACTIVE))
-		schedule_delayed_work(&bat_power->curve_work, 0);
 
 	return 0;
 }

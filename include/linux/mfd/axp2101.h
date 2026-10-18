@@ -739,7 +739,12 @@ extern int axp_debug_mask;
 #define AXP2202_COMM_FAULT          (0x08)
 #define AXP2202_ICO_CFG             (0x0a)
 #define AXP2202_CLK_EN              (0x0b)
-/* Data buffer kept across reboots; the battery driver stores a smoothed SOC here */
+/*
+ * Data buffer kept across reboots. TrimUI's U-Boot writes 0x81 (bit 7 =
+ * smoothing on, bits 6:0 = 1%) here after restarting a gauge that reads 0% on
+ * a charger; Allwinner's battery driver then reports a SOC climbing from 1%.
+ * axp2202_battery.c neither reads nor writes it.
+ */
 #define AXP2202_CURVE_CHECK         (0x0c)
 
 #define AXP2202_COMM_CFG            (0x10)
