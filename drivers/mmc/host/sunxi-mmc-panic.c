@@ -1045,7 +1045,7 @@ static int sunxi_mmc_panic_write_ps(const char *buf, sector_t sect_off,
 {
 	int ret;
 
-	if (sect_off + sects >= blkdev_sects)
+	if (sect_off + sects > blkdev_sects)
 		return -EOVERFLOW;
 	ret =  sunxi_mmc_panic_write(blkdev_start_sect + sect_off, sects, buf);
 	if (ret)
