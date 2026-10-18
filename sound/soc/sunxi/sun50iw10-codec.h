@@ -407,6 +407,13 @@ struct codec_dap {
 	int hpf_enable;
 };
 
+/* Outputs with their own playback volume */
+enum sunxi_codec_output {
+	SUNXI_OUTPUT_SPEAKER,
+	SUNXI_OUTPUT_HEADPHONE,
+	SUNXI_OUTPUT_COUNT,
+};
+
 struct sunxi_codec_info {
 	struct device *dev;
 	struct regmap *regmap;
@@ -433,6 +440,8 @@ struct sunxi_codec_info {
 	u32 mic1gain;
 	u32 mic2gain;
 	u32 headphonegain;
+	/* DAC volume level (0-255, 159 = 0 dB) for each output, for both channels */
+	unsigned int output_vol[SUNXI_OUTPUT_COUNT];
 
 	struct codec_spk_config spk_config;
 	struct codec_hw_config hw_config;

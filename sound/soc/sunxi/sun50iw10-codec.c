@@ -587,6 +587,84 @@ static const struct soc_enum sunxi_codec_adcswap_func_enum[] = {
 			sunxi_codec_adcswap_function),
 };
 
+/* The DAPM pin of each output with its own volume */
+static const char * const sunxi_output_pins[] = {
+	[SUNXI_OUTPUT_SPEAKER] = "HpSpeaker",
+	[SUNXI_OUTPUT_HEADPHONE] = "Headphone",
+};
+
+/* Sets both DAC channels to @out's volume. */
+static void sunxi_codec_apply_output_vol(struct snd_soc_codec *codec,
+					 enum sunxi_codec_output out)
+{
+	struct sunxi_codec_info *sunxi_codec = snd_soc_codec_get_drvdata(codec);
+	unsigned int vol = sunxi_codec->output_vol[out];
+
+	snd_soc_update_bits(codec, SUNXI_DAC_VOL_CTRL,
+			    0xFF << DAC_VOL_L | 0xFF << DAC_VOL_R,
+			    vol << DAC_VOL_L | vol << DAC_VOL_R);
+}
+
+/*
+ * Get and put for "Speaker Playback Volume" and "Headphone Playback Volume" (DAC volume levels,
+ * 159 = 0 dB). The controls have no register (SND_SOC_NOPM), so their shift field holds the
+ * output (enum sunxi_codec_output).
+ */
+static int sunxi_codec_get_output_vol(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct sunxi_codec_info *sunxi_codec = snd_soc_codec_get_drvdata(codec);
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+
+	ucontrol->value.integer.value[0] = sunxi_codec->output_vol[mc->shift];
+	return 0;
+}
+
+/*
+ * Stores the volume, and writes it to the DAC now if that output's pin is enabled (by the jack, or
+ * its pin switch); otherwise it is written when the output next powers up.
+ */
+static int sunxi_codec_put_output_vol(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
+	struct snd_soc_dapm_context *dapm = snd_soc_codec_get_dapm(codec);
+	struct sunxi_codec_info *sunxi_codec = snd_soc_codec_get_drvdata(codec);
+	struct soc_mixer_control *mc =
+		(struct soc_mixer_control *)kcontrol->private_value;
+	unsigned int vol = ucontrol->value.integer.value[0];
+	int changed;
+
+	if (vol > mc->max)
+		return -EINVAL;
+
+	/* The output events also write the DAC volume, under the DAPM lock: don't interleave. */
+	mutex_lock_nested(&dapm->card->dapm_mutex, SND_SOC_DAPM_CLASS_RUNTIME);
+	changed = sunxi_codec->output_vol[mc->shift] != vol;
+	sunxi_codec->output_vol[mc->shift] = vol;
+	if (snd_soc_dapm_get_pin_status(dapm, sunxi_output_pins[mc->shift]))
+		sunxi_codec_apply_output_vol(codec, mc->shift);
+	mutex_unlock(&dapm->card->dapm_mutex);
+
+	return changed;
+}
+
+/*
+ * Writes the headphones' volume to the DAC as the Headphone output powers up: at stream start
+ * (before playback is triggered) and when the jack switches to headphones during playback. The
+ * speaker's counterpart is in sunxi_codec_hpspeaker_event.
+ */
+static int sunxi_codec_headphone_event(struct snd_soc_dapm_widget *w,
+				       struct snd_kcontrol *k, int event)
+{
+	if (event == SND_SOC_DAPM_POST_PMU)
+		sunxi_codec_apply_output_vol(snd_soc_dapm_to_codec(w->dapm),
+					     SUNXI_OUTPUT_HEADPHONE);
+	return 0;
+}
+
 static int sunxi_codec_hpspeaker_event(struct snd_soc_dapm_widget *w,
 				struct snd_kcontrol *k, int event)
 {
@@ -597,6 +675,8 @@ static int sunxi_codec_hpspeaker_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case	SND_SOC_DAPM_POST_PMU:
+		/* before the speaker amplifier (spk_gpio) is switched on */
+		sunxi_codec_apply_output_vol(codec, SUNXI_OUTPUT_SPEAKER);
 #ifdef SUNXI_CODEC_DAP_ENABLE
 		if (hw_cfg->dacdrc_cfg & DAP_SPK_EN)
 			dacdrc_enable(codec, 1);
@@ -837,9 +917,13 @@ static const struct snd_kcontrol_new sunxi_codec_controls[] = {
 	/* DAC Volume */
 	SOC_SINGLE_TLV("LINEOUT volume", SUNXI_DAC_REG, LINEOUT_VOL,
 			0x1F, 0, lineout_tlv),
-	/* DAC Volume / HEADPHONE VOL */
-	SOC_DOUBLE_TLV("DAC volume", SUNXI_DAC_VOL_CTRL, DAC_VOL_L, DAC_VOL_R,
-		       0xFF, 0, dac_vol_tlv),
+	/* DAC volume for each output; 159 = 0 dB */
+	SOC_SINGLE_EXT_TLV("Speaker Playback Volume", SND_SOC_NOPM,
+			   SUNXI_OUTPUT_SPEAKER, 0xFF, 0, sunxi_codec_get_output_vol,
+			   sunxi_codec_put_output_vol, dac_vol_tlv),
+	SOC_SINGLE_EXT_TLV("Headphone Playback Volume", SND_SOC_NOPM,
+			   SUNXI_OUTPUT_HEADPHONE, 0xFF, 0, sunxi_codec_get_output_vol,
+			   sunxi_codec_put_output_vol, dac_vol_tlv),
 	/* ADC Volume */
 	SOC_DOUBLE_TLV("ADC volume", SUNXI_ADC_VOL_CTRL, ADC_VOL_L, ADC_VOL_R,
 		       0xFF, 0, adc_vol_tlv),
@@ -916,7 +1000,7 @@ static const struct snd_soc_dapm_widget sunxi_codec_dapm_widgets[] = {
 	SND_SOC_DAPM_PGA_E("HP Amp", SND_SOC_NOPM, 0, 0, NULL, 0, sunxi_codec_hpamp_event,
 			   SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
 
-	SND_SOC_DAPM_HP("Headphone", NULL),
+	SND_SOC_DAPM_HP("Headphone", sunxi_codec_headphone_event),
 	SND_SOC_DAPM_LINE("LINEOUT", sunxi_codec_lineout_event),
 	SND_SOC_DAPM_SPK("HpSpeaker", sunxi_codec_hpspeaker_event),
 };
@@ -953,7 +1037,7 @@ static void sunxi_codec_init(struct snd_soc_codec *codec)
 	/*
 	 * The DAC volume register starts at the device tree's dac_digital_vol
 	 * (including its DAC_VOL_SEL bit, which turns the digital volume on);
-	 * after that, only the "DAC volume" control changes it. On resume,
+	 * after that, only the output volumes change it. On resume,
 	 * echo_audio_reg() then puts back the level from before suspend.
 	 */
 	snd_soc_write(codec, SUNXI_DAC_VOL_CTRL, sunxi_codec->dac_digital_vol);
@@ -1319,6 +1403,7 @@ static struct snd_soc_dai_driver sunxi_codec_dai[] = {
 
 static int sunxi_codec_probe(struct snd_soc_codec *codec)
 {
+	struct sunxi_codec_info *sunxi_codec = snd_soc_codec_get_drvdata(codec);
 	int ret;
 	struct snd_soc_dapm_context *dapm = &codec->component.dapm;
 
@@ -1333,6 +1418,12 @@ static int sunxi_codec_probe(struct snd_soc_codec *codec)
 				ARRAY_SIZE(sunxi_codec_dapm_routes));
 
 	sunxi_codec_init(codec);
+
+	/* both outputs start at dac_digital_vol's left-channel level */
+	sunxi_codec->output_vol[SUNXI_OUTPUT_SPEAKER] =
+		(sunxi_codec->dac_digital_vol >> DAC_VOL_L) & 0xFF;
+	sunxi_codec->output_vol[SUNXI_OUTPUT_HEADPHONE] =
+		sunxi_codec->output_vol[SUNXI_OUTPUT_SPEAKER];
 
 	return 0;
 }
