@@ -151,6 +151,11 @@ static char *gccmu_base_reg;
 #if IS_BUILTIN(CONFIG_PSTORE_BLK) && IS_BUILTIN(CONFIG_MMC_SUNXI)	/* as include/linux/mmc/host.h */
 /* The host whose card holds pstore/blk's partition; set once registration succeeded. */
 static struct sunxi_mmc_host *ps_host;
+/*
+ * The card that holds the partition. A reference is kept, so that a card inserted after it is
+ * removed cannot be allocated at the same address and pass for it in sunxi_mmc_panic_write_ps().
+ */
+static struct mmc_card *ps_card;
 static sector_t blkdev_start_sect;
 static sector_t blkdev_sects;
 #endif
@@ -998,17 +1003,17 @@ static ssize_t sunxi_mmc_panic_read_ps(const char *buf, sector_t start_sect,
 static int sunxi_mmc_panic_write_ps(const char *buf, sector_t sect_off,
 		sector_t sects)
 {
-	int ret;
+	u32 addr = blkdev_start_sect + sect_off;
 
-	if (!ps_host)
+	/* The card was removed or swapped since registering: write nothing */
+	if (!ps_host || ps_host->mmc->card != ps_card)
 		return -ENODEV;
 	if (sect_off + sects > blkdev_sects)
 		return -EOVERFLOW;
-	ret = sunxi_mmc_panic_write(ps_host, blkdev_start_sect + sect_off,
-				    sects, buf);
-	if (ret)
-		return ret;
-	return 0;
+	/* Standard-capacity cards (2 GB and under) take byte addresses */
+	if (!mmc_card_blockaddr(ps_card))
+		addr <<= 9;
+	return sunxi_mmc_panic_write(ps_host, addr, sects, buf);
 }
 
 /*
@@ -1041,7 +1046,9 @@ static dev_t sunxi_mmc_panic_blkdev_on(struct mmc_card *card)
 
 /*
  * pstore/blk itself checks only the major number, which the eMMC and SD cards share, so the
- * partition is checked to be on this card first. One card registers; later ones get -EBUSY.
+ * partition is checked to be on this card first. One card registers; later ones get -EBUSY,
+ * so once a registered SD card is removed nothing is recorded until a restart, even if it is
+ * put back (pstore/blk keeps the old partition open).
  */
 int sunxi_mmc_panic_init_ps(struct mmc_host *mmc)
 {
@@ -1075,6 +1082,8 @@ int sunxi_mmc_panic_init_ps(struct mmc_host *mmc)
 
 	blkdev_sects = info.nr_sects;
 	blkdev_start_sect = info.start_sect;
+	ps_card = mmc->card;
+	get_device(&ps_card->dev);
 	ps_host = mmc_priv(mmc);
 	return 0;
 }

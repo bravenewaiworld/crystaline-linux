@@ -1368,6 +1368,7 @@ int mmc_attach_sd(struct mmc_host *host)
 	if (err)
 		goto remove_card;
 
+	sunxi_mmc_panic_init_ps(host);
 	mmc_claim_host(host);
 	return 0;
 
