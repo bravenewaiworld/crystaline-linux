@@ -1,13 +1,26 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Newer kernel interfaces used by this driver, written in terms of what
- * Linux 4.9 provides.
+ * Port notes: newer kernel interfaces used by this driver, written in terms
+ * of what Linux 4.9 provides, and the upstream fixes applied.
  *
  * The driver is fs/exfat from Linux 6.18.57. Each entry here is a one-to-one
  * rename or a small helper, so the rest of the driver stays as upstream wrote
  * it and upstream fixes apply cleanly; the parts where 4.9 works differently
  * (mount options, page cache and mmap hooks, attribute calls) are changed in
  * place.
+ *
+ * Upstream fixes from after 6.18 applied on top (mainline commits), each with
+ * "commit <id> upstream." and how it was adapted in its message:
+ *   866cba367541 exfat: validate the cluster bitmap bits of directory
+ *   d1d75eaf01ab exfat: fix error handling for FAT table operations
+ *   73f01258002f exfat: fix passing zero to ERR_PTR() in exfat_mkdir()
+ *   4129a3a2751c exfat: fix s_maxbytes
+ *   896fcc93574f exfat: write moved entry before removing source
+ *   ce12a39bed48 exfat: free new directory cluster if zeroing fails
+ *   0901a71e8cff exfat: clean up new entry on add entry failure
+ *   0eb24ad05a6a exfat: fix overflow in cluster-to-dentry conversion
+ * Not listed because 6.18.57 already has it: ff37797badd8 (directory
+ * checksum after a rename to a shorter name).
  *
  * 64-bit only: on 64-bit, 4.9 defines struct timespec64 as struct timespec
  * (the type of inode timestamps), so the timestamp helpers below copy them as
