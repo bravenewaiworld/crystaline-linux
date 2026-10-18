@@ -1333,21 +1333,40 @@ static int led_regulator_request(struct sunxi_led *led)
 	struct regulator *regu = NULL;
 
 	/* Consider "n*" as nocare. Support "none", "nocare", "null", "" etc. */
-	if ((led->regulator_id[0] == 'n') || (led->regulator_id[0] == 0))
+	if ((led->regulator_id[0] == 'n') || (led->regulator_id[0] == 0)) {
+		led->powered = true;
 		return 0;
+	}
 
 	regu = regulator_get(NULL, led->regulator_id);
 	if (IS_ERR(regu)) {
 		LED_ERR("get regulator %s failed!\n", led->regulator_id);
 		return -1;
 	}
-	if (regulator_enable(regu)) {
-		LED_ERR("enable regulator %s failed!\n", led->regulator_id);
-		regulator_put(regu);
-		return -1;
-	}
 	led->regulator = regu;
 
+	return 0;
+}
+
+/*
+ * Switches the LEDs' supply, if there is one and it isn't in that state already (regulator
+ * enables are counted, so they must stay paired). regulator_enable() waits for the regulator's
+ * DT "startup-delay-us", giving the LEDs time to power up before data is sent.
+ */
+static int sunxi_led_set_power(struct sunxi_led *led, bool on)
+{
+	int err;
+
+	if (!led->regulator || led->powered == on)
+		return 0;
+
+	err = on ? regulator_enable(led->regulator) : regulator_disable(led->regulator);
+	if (err) {
+		LED_ERR("switching regulator %s %s failed: %d\n", led->regulator_id,
+			on ? "on" : "off", err);
+		return err;
+	}
+	led->powered = on;
 	return 0;
 }
 
@@ -1356,11 +1375,50 @@ static int led_regulator_release(struct sunxi_led *led)
 	if (led->regulator == NULL)
 		return 0;
 
-	regulator_disable(led->regulator);
+	sunxi_led_set_power(led, false);
 	regulator_put(led->regulator);
 	led->regulator = NULL;
 
 	return 1;
+}
+
+/*
+ * Sends the stored colours of the first @length LEDs (the whole chain if the supply has to be
+ * switched on first). The supply is on only while some LED in the chain is lit: switched on
+ * before a frame that lights one, off after a frame that leaves all dark. Caller holds xfer_lock.
+ */
+static void sunxi_led_update(struct sunxi_led *led, u32 length)
+{
+	unsigned long flags;
+	bool lit = memchr_inv(led->data, 0, led->led_count * sizeof(*led->data));
+
+	if (lit && !led->powered) {
+		if (sunxi_led_set_power(led, true))
+			return;
+		/* LEDs that were unpowered hold no colours: send the whole chain. */
+		length = led->led_count;
+	}
+	/* Nothing lit and the supply off: the LEDs are dark already. */
+	if (!led->powered)
+		return;
+
+	spin_lock_irqsave(&led->lock, flags);
+	led->length = length;
+	spin_unlock_irqrestore(&led->lock, flags);
+
+	sunxi_ledc_trans_data(led);
+	if (debug_mask & DEBUG_INFO2) {
+		dprintk(DEBUG_INFO2, "dump reg:\n");
+		led_dump_reg(led, 0, 0x30);
+	}
+	sunxi_ledc_complete(led);
+
+	/*
+	 * The all-dark frame is sent before switching off: if another consumer keeps the regulator
+	 * on, the LEDs would otherwise keep their old colours.
+	 */
+	if (!lit)
+		sunxi_led_set_power(led, false);
 }
 
 static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
@@ -1416,16 +1474,8 @@ static int sunxi_set_led_brightness(struct led_classdev *led_cdev,
 	mutex_lock(&led->xfer_lock);
 	spin_lock_irqsave(&led->lock, flags);
 	led->data[pcdev_group->led_num] = new_data;
-	led->length = length;
 	spin_unlock_irqrestore(&led->lock, flags);
-
-	sunxi_ledc_trans_data(led);
-	if (debug_mask & DEBUG_INFO2) {
-		dprintk(DEBUG_INFO2, "dump reg:\n");
-		led_dump_reg(led, 0, 0x30);
-	}
-
-	sunxi_ledc_complete(led);
+	sunxi_led_update(led, length);
 	mutex_unlock(&led->xfer_lock);
 
 	do_gettimeofday(&end);
@@ -1887,30 +1937,6 @@ static int led_select_gpio_state(struct pinctrl *pctrl, char *name)
 	return ret;
 }
 
-static int led_regulator_enable(struct sunxi_led *led)
-{
-	if (led->regulator == NULL)
-		return 0;
-
-	if (regulator_enable(led->regulator) != 0) {
-		LED_ERR("enable regulator %s failed!\n", led->regulator_id);
-		return -1;
-	}
-	return 0;
-}
-
-static int led_regulator_disable(struct sunxi_led *led)
-{
-	if (led->regulator == NULL)
-		return 0;
-
-	if (regulator_disable(led->regulator) != 0) {
-		LED_ERR("enable regulator %s failed!\n", led->regulator_id);
-		return -1;
-	}
-	return 0;
-}
-
 static int sunxi_led_suspend_noirq(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -1918,7 +1944,7 @@ static int sunxi_led_suspend_noirq(struct device *dev)
 
 	sunxi_clk_disable(led);
 	led_select_gpio_state(led->pctrl, PINCTRL_STATE_SLEEP);
-	led_regulator_disable(led);
+	sunxi_led_set_power(led, false);
 
 	dprintk(DEBUG_SUSPEND, "finish\n");
 
@@ -1930,7 +1956,6 @@ static int sunxi_led_resume_noirq(struct device *dev)
 	struct platform_device *pdev = to_platform_device(dev);
 	struct sunxi_led *led = platform_get_drvdata(pdev);
 
-	led_regulator_enable(led);
 	led_select_gpio_state(led->pctrl, PINCTRL_STATE_DEFAULT);
 	sunxi_clk_enable(led);
 
@@ -1940,21 +1965,16 @@ static int sunxi_led_resume_noirq(struct device *dev)
 }
 
 /*
- * The LEDs lose their colours in deep sleep, so send the stored ones again. A normal resume
- * callback rather than resume_noirq, because the transfer waits for the controller's interrupt,
- * which isn't delivered in the noirq phase.
+ * The LEDs lose their colours in deep sleep, so send the stored ones again (which also switches
+ * their supply back on if any is lit). A normal resume callback rather than resume_noirq, because
+ * the transfer waits for the controller's interrupt, which isn't delivered in the noirq phase.
  */
 static int sunxi_led_resume(struct device *dev)
 {
 	struct sunxi_led *led = dev_get_drvdata(dev);
-	unsigned long flags;
 
 	mutex_lock(&led->xfer_lock);
-	spin_lock_irqsave(&led->lock, flags);
-	led->length = led->led_count;
-	spin_unlock_irqrestore(&led->lock, flags);
-	sunxi_ledc_trans_data(led);
-	sunxi_ledc_complete(led);
+	sunxi_led_update(led, led->led_count);
 	mutex_unlock(&led->xfer_lock);
 
 	return 0;

@@ -165,7 +165,8 @@ struct sunxi_led {
 	struct sunxi_led_classdev_group *pcdev_group;
 	struct dentry *debugfs_dir;
 	char regulator_id[16];
-	struct regulator *regulator;
+	struct regulator *regulator;	/* the LEDs' supply, if any */
+	bool powered;			/* LEDs can take data: supply on, or no supply to switch */
 };
 
 enum {
