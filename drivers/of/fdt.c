@@ -1257,6 +1257,51 @@ bool __init early_init_dt_scan(void *params)
 	return true;
 }
 
+#ifdef CONFIG_OF_EDITS
+#include "fdt_edits.h"
+
+static void __init note_edit(const struct fdt_edit *e, const char *what)
+{
+	pr_info(" dt-edits: %s %s %s (set before the kernel started)\n",
+		what, e->path, e->name);
+}
+
+/*
+ * Replaces initial_boot_params with a copy carrying the built-in edits. If they
+ * fail, the copy is the bootloader's tree unchanged (plus the failure in
+ * /chosen), so a partly edited tree never boots. If even the copy fails, the
+ * bootloader's tree is used as it is, with no status.
+ */
+static void __init apply_builtin_edits(void)
+{
+	struct fdt_edits_result res;
+	void *fdt = initial_boot_params;
+	void *buf;
+	int err;
+
+	if (!fdt)
+		return;
+	/* Aligned as unflatten_and_copy_device_tree() aligns its copy. */
+	buf = early_init_dt_alloc_memory_arch(fdt_totalsize(fdt) + FDT_EDITS_ROOM,
+					      roundup_pow_of_two(FDT_V17_SIZE));
+	err = fdt_edits_copy_and_apply(fdt, buf, &res, note_edit);
+	if (err) {
+		pr_crit(" dt-edits %s: FAILED to copy the device tree or record the outcome: %s; booting the bootloader's device tree unchanged\n",
+			fdt_edits_id, fdt_strerror(err));
+		return;
+	}
+	if (res.error)
+		pr_crit(" dt-edits: %s; booting the bootloader's device tree unchanged\n",
+			res.status);
+	else
+		pr_info(" dt-edits: %s\n", res.status);
+
+	early_init_dt_verify(buf);	/* buf becomes initial_boot_params (and /sys/firmware/fdt) */
+}
+#else
+static inline void apply_builtin_edits(void) {}
+#endif
+
 /**
  * unflatten_device_tree - create tree of device_nodes from flat blob
  *
@@ -1267,6 +1312,7 @@ bool __init early_init_dt_scan(void *params)
  */
 void __init unflatten_device_tree(void)
 {
+	apply_builtin_edits();
 	__unflatten_device_tree(initial_boot_params, NULL, &of_root,
 				early_init_dt_alloc_memory_arch, false);
 

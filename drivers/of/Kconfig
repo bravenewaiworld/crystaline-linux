@@ -43,6 +43,24 @@ config OF_EARLY_FLATTREE
 	bool
 	select OF_FLATTREE
 
+config OF_EDITS
+	bool "Built-in device-tree edits"
+	depends on OF_EARLY_FLATTREE
+	help
+	  Applies a table of edits (setting and deleting properties, adding
+	  nodes) to the bootloader's device tree before the kernel reads it,
+	  so the kernel carries its own changes to a vendor tree. If the
+	  edits fail, the bootloader's tree is used unchanged. The outcome is
+	  in /chosen/crystaline,dt-edits and the kernel log.
+
+config OF_EDITS_TABLE
+	string "Edits table (C file)"
+	depends on OF_EDITS
+	help
+	  The generated table (see drivers/of/fdt_edits.h), as a path
+	  relative to the kernel's build directory: a C file defining
+	  fdt_edits[], fdt_edits_count and fdt_edits_id.
+
 config OF_PROMTREE
 	bool
 
