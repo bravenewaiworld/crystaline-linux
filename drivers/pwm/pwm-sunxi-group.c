@@ -1364,7 +1364,7 @@ static int sunxi_pwm_suspend(struct device *dev)
 static int sunxi_pwm_resume(struct device *dev)
 {
 	int i = 0;
-	int period, duty_cycle, polarity;
+	int period, duty_cycle;
 	struct platform_device *pdev = container_of(dev,
 			struct platform_device, dev);
 	struct sunxi_pwm_chip *pwm = platform_get_drvdata(pdev);
@@ -1383,9 +1383,15 @@ static int sunxi_pwm_resume(struct device *dev)
 		pwm->chip.pwms[i].state.duty_cycle = 0;
 		pwm_config(&pwm->chip.pwms[i], duty_cycle, period);
 
-		polarity = pwm->chip.pwms[i].state.polarity;
-		pwm->chip.pwms[i].state.polarity = PWM_POLARITY_NORMAL;
-		pwm_set_polarity(&pwm->chip.pwms[i], polarity);
+		/*
+		 * Deep sleep resets the registers; the core's pwm_set_polarity() skips the write when
+		 * the remembered polarity already matches, leaving the channel at its reset value
+		 * (inverted). Channels never configured (no period) are left at their reset value,
+		 * as they are at boot.
+		 */
+		if (period)
+			sunxi_pwm_set_polarity(&pwm->chip, &pwm->chip.pwms[i],
+					       pwm->chip.pwms[i].state.polarity);
 
 		if (pwm->chip.pwms[i].state.enabled == true) {
 			pwm->chip.pwms[i].state.enabled = false;
