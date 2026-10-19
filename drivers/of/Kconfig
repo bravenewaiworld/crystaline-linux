@@ -51,7 +51,8 @@ config OF_EDITS
 	  nodes) to the bootloader's device tree before the kernel reads it,
 	  so the kernel carries its own changes to a vendor tree. If the
 	  edits fail, the bootloader's tree is used unchanged. The outcome is
-	  in /chosen/crystaline,dt-edits and the kernel log.
+	  in /chosen/crystaline,dt-edits and the kernel log; the tree as the
+	  bootloader handed it over is /sys/firmware/fdt-bootloader.
 
 config OF_EDITS_TABLE
 	string "Edits table (C file)"

@@ -1260,6 +1260,13 @@ bool __init early_init_dt_scan(void *params)
 #ifdef CONFIG_OF_EDITS
 #include "fdt_edits.h"
 
+/*
+ * The bootloader's tree, once the kernel boots its own copy (edited or not).
+ * Still mapped and reserved (early_init_fdt_reserve_self()), so readable after
+ * boot.
+ */
+static void *bootloader_fdt;
+
 static void __init note_edit(const struct fdt_edit *e, const char *what)
 {
 	pr_info(" dt-edits: %s %s %s (set before the kernel started)\n",
@@ -1296,6 +1303,7 @@ static void __init apply_builtin_edits(void)
 	else
 		pr_info(" dt-edits: %s\n", res.status);
 
+	bootloader_fdt = fdt;
 	early_init_dt_verify(buf);	/* buf becomes initial_boot_params (and /sys/firmware/fdt) */
 }
 #else
@@ -1360,6 +1368,31 @@ static ssize_t of_fdt_raw_read(struct file *filp, struct kobject *kobj,
 	memcpy(buf, initial_boot_params + off, count);
 	return count;
 }
+
+#ifdef CONFIG_OF_EDITS
+static ssize_t of_fdt_bootloader_read(struct file *filp, struct kobject *kobj,
+				      struct bin_attribute *bin_attr,
+				      char *buf, loff_t off, size_t count)
+{
+	memcpy(buf, bootloader_fdt + off, count);
+	return count;
+}
+
+/* /sys/firmware/fdt-bootloader: the tree the built-in edits were applied to. */
+static int __init of_fdt_bootloader_init(void)
+{
+	static struct bin_attribute attr = {
+		.attr = { .name = "fdt-bootloader", .mode = S_IRUSR },
+		.read = of_fdt_bootloader_read,
+	};
+
+	if (!bootloader_fdt)
+		return 0;
+	attr.size = fdt_totalsize(bootloader_fdt);
+	return sysfs_create_bin_file(firmware_kobj, &attr);
+}
+late_initcall(of_fdt_bootloader_init);
+#endif
 
 static int __init of_fdt_raw_init(void)
 {
