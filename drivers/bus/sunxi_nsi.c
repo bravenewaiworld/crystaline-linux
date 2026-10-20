@@ -211,7 +211,10 @@ int notrace nsi_pmu_set_timer(enum nsi_pmu port, unsigned int us)
 	/* enabled the pmu count */
 	nsi_pmu_enable(port);
 
-	udelay(us);
+	/*
+	 * The counters hold the window's totals once it has elapsed: whoever reads them waits
+	 * that long first (in user space, so a long window doesn't keep a CPU busy here).
+	 */
 	mutex_unlock(&nsi_seting);
 
 	return 0;
