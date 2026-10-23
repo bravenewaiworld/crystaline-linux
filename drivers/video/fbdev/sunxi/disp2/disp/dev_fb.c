@@ -2289,7 +2289,14 @@ static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
 
 			config.info.mode = LAYER_MODE_BUFFER;
 			config.info.zorder = 0;
-			config.info.alpha_mode = 0;
+			/*
+			 * Global alpha, opaque: the framebuffer's fourth byte is padding to its
+			 * clients (the PowerVR display class declares XRGB8888, and Vulkan's
+			 * opaque composite alpha lets programs leave anything there). Per-pixel
+			 * alpha would blend it over the black background: holes wherever a game's
+			 * frame carries alpha (seen with Animal Crossing).
+			 */
+			config.info.alpha_mode = 1;
 			config.info.alpha_value = 0xff;
 			config.info.fb.crop.x = ((long long)0) << 32;
 			config.info.fb.crop.y = ((long long)y_offset) << 32;
