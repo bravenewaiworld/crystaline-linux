@@ -787,6 +787,14 @@ static int sunxi_fb_check_var(struct fb_var_screeninfo *var,
 			return -EINVAL;
 		}
 	}
+	/* Sizes may change (sunxi_fb_set_par); the pixel format may not: dc_sunxi, the GPU
+	 * driver's display module, fixes it when it loads. */
+	if (info->node < SUNXI_FB_MAX && g_fbi.fb_enable[info->node] &&
+	    (var->bits_per_pixel != info->var.bits_per_pixel ||
+	     var->red.offset != info->var.red.offset ||
+	     var->green.offset != info->var.green.offset ||
+	     var->blue.offset != info->var.blue.offset))
+		return -EINVAL;
 
 	return 0;
 }
@@ -1503,6 +1511,66 @@ static int sunxi_fb_ioctl(struct fb_info *info, unsigned int cmd,
 	return ret;
 }
 
+static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para,
+			      bool resize);
+
+/*
+ * Mode set (FBIOPUT_VSCREENINFO, e.g. fbset -g): a new size or buffer count (yres_virtual /
+ * yres) is laid out anew in the memory allocated at boot; a layout that doesn't fit is refused.
+ * The layer still fills the screen, so the display engine scales the picture and a program can
+ * draw at a smaller size (the GameCube recompiler's games draw 640x480: the GPU then copies their
+ * frames unscaled). The memory is cleared and its layout changes under anyone drawing into it,
+ * so switch only while nothing draws. dc_sunxi (the GPU driver's display module) places a
+ * program's swapchain images in this memory when they're created, and decided at load whether
+ * it can flip, which needs whole pages per buffer (hence that check; the pixel format it fixed is
+ * sunxi_fb_check_var's). The memory is kept rather than allocated anew: the vendor's ION free
+ * (__disp_ion_free_coherent) releases a buffer twice, and keeping it leaves existing mappings
+ * (programs' mmaps, the GPU's) valid.
+ */
+static int sunxi_fb_set_par(struct fb_info *info)
+{
+	u32 fb_id = info->node;
+	struct fb_var_screeninfo *var = &info->var;
+	struct disp_fb_create_info para;
+	u64 frame, bytes;
+
+	if (fb_id >= SUNXI_FB_MAX || !g_fbi.fb_enable[fb_id])
+		return 0;
+	if (var->xres == 0 || var->yres == 0 || var->xres > 4096 ||
+	    var->yres > 4096)
+		return -EINVAL;
+	para = g_fbi.fb_para[fb_id];
+	para.width = var->xres;
+	para.height = var->yres;
+	para.buffer_num = max(var->yres_virtual / var->yres, 1u);
+	/* The virtual size is what the layout makes of it (pans stay inside it). */
+	var->xres_virtual = var->xres;
+	var->yres_virtual = var->yres * para.buffer_num;
+	if (para.width == g_fbi.fb_para[fb_id].width &&
+	    para.height == g_fbi.fb_para[fb_id].height &&
+	    para.buffer_num == g_fbi.fb_para[fb_id].buffer_num)
+		return 0;
+	frame = (u64)((para.width * var->bits_per_pixel) >> 3) * para.height;
+	bytes = frame * para.buffer_num;
+	if (bytes > info->fix.smem_len) {
+		pr_err("fb%u: %ux%u, %u buffers need %llu bytes; %u were allocated at boot\n",
+		       fb_id, para.width, para.height, para.buffer_num, bytes,
+		       info->fix.smem_len);
+		return -EINVAL;
+	}
+	if (para.buffer_num > 1 && frame % PAGE_SIZE) {
+		pr_err("fb%u: %ux%u: a buffer of %llu bytes isn't whole pages (dc_sunxi flips by whole pages)\n",
+		       fb_id, para.width, para.height, frame);
+		return -EINVAL;
+	}
+	if (display_fb_request(fb_id, &para, true) != 0)
+		return -EINVAL;
+	pr_info("fb%u: %ux%u, %u buffers, shown at %ux%u\n", fb_id, para.width,
+		para.height, para.buffer_num, para.output_width,
+		para.output_height);
+	return 0;
+}
+
 static struct fb_ops dispfb_ops = {
 	.owner = THIS_MODULE,
 	.fb_open = sunxi_fb_open,
@@ -1513,6 +1581,7 @@ static struct fb_ops dispfb_ops = {
 #endif
 	.fb_ioctl = sunxi_fb_ioctl,
 	.fb_check_var = sunxi_fb_check_var,
+	.fb_set_par = sunxi_fb_set_par,
 	.fb_blank = sunxi_fb_blank,
 	.fb_cursor = sunxi_fb_cursor,
 	.fb_mmap = sunxi_fb_mmap,
@@ -2160,7 +2229,13 @@ static int Fb_map_kernel_logo(u32 sel, struct fb_info *info)
 	return 0;
 }
 
-static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
+/*
+ * Sets fb_id up for fb_para: geometry, memory and layer (the picture scaled to fb_para's output
+ * size). With `resize`, the memory allocated at boot is reused, cleared and laid out anew (the
+ * caller checks it fits), and the boot logo isn't copied in.
+ */
+static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para,
+			      bool resize)
 {
 	struct fb_info *info = NULL;
 	struct disp_layer_config config;
@@ -2185,7 +2260,7 @@ static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
 
 	printk("%s,fb_id:%d\n", __func__, fb_id);
 
-	if (g_fbi.fb_enable[fb_id]) {
+	if (g_fbi.fb_enable[fb_id] && !resize) {
 		__wrn("%s, fb%d is already requested!\n", __func__, fb_id);
 		return -1;
 	}
@@ -2206,14 +2281,16 @@ static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
 	info->var.xres_virtual = xres;
 	info->fix.line_length =
 	    (fb_para->width * info->var.bits_per_pixel) >> 3;
-	info->fix.smem_len =
-	    info->fix.line_length * fb_para->height * fb_para->buffer_num;
-	if (info->fix.line_length != 0)
-		info->var.yres_virtual =
-		    info->fix.smem_len / info->fix.line_length;
-	ret = fb_map_video_memory(info);
-	if (ret)
-		goto OUT;
+	info->var.yres_virtual = yres * fb_para->buffer_num;
+	if (resize) {
+		memset((void *__force)info->screen_base, 0x0, info->fix.smem_len);
+	} else {
+		info->fix.smem_len =
+		    info->fix.line_length * fb_para->height * fb_para->buffer_num;
+		ret = fb_map_video_memory(info);
+		if (ret)
+			goto OUT;
+	}
 
 	for (sel = 0; sel < num_screens; sel++) {
 		if (sel == fb_para->fb_mode) {
@@ -2229,12 +2306,15 @@ static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
 					    1000000000 / tt.pixel_clk;
 				g_fbi.fbinfo[fb_id]->var.left_margin =
 				    tt.hor_back_porch;
+				/* A smaller fb0 keeps the panel's totals (its refresh rate). */
 				g_fbi.fbinfo[fb_id]->var.right_margin =
-				    tt.hor_front_porch;
+				    tt.hor_front_porch +
+				    (tt.x_res > xres ? tt.x_res - xres : 0);
 				g_fbi.fbinfo[fb_id]->var.upper_margin =
 				    tt.ver_back_porch;
 				g_fbi.fbinfo[fb_id]->var.lower_margin =
-				    tt.ver_front_porch;
+				    tt.ver_front_porch +
+				    (tt.y_res > yres ? tt.y_res - yres : 0);
 				g_fbi.fbinfo[fb_id]->var.hsync_len =
 				    tt.hor_sync_time;
 				g_fbi.fbinfo[fb_id]->var.vsync_len =
@@ -2250,7 +2330,8 @@ static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
 			config.channel = g_fbi.layer_hdl[fb_id][0];
 			config.layer_id = g_fbi.layer_hdl[fb_id][1];
 			config.enable = 1;
-			Fb_map_kernel_logo(sel, info);
+			if (!resize)
+				Fb_map_kernel_logo(sel, info);
 			if (g_disp_drv.para.boot_info.sync == 1) {
 				if ((sel == g_disp_drv.para.boot_info.disp) &&
 				    (g_disp_drv.para.boot_info.type !=
@@ -2337,6 +2418,8 @@ static s32 display_fb_request(u32 fb_id, struct disp_fb_create_info *fb_para)
 			}
 #endif
 #if defined(CONFIG_SUNXI_DISP2_FB_HW_ROTATION_SUPPORT)
+			if (resize && g_fbi.fb_rot[fb_id])
+				g_fbi.fb_rot[fb_id]->free(g_fbi.fb_rot[fb_id]);
 			g_fbi.fb_rot[fb_id] = fb_g2d_rot_create(info, fb_id, &config);
 			if (g_fbi.fb_rot[fb_id])
 				g_fbi.fb_rot[fb_id]->apply(g_fbi.fb_rot[fb_id], &config);
@@ -2622,7 +2705,7 @@ s32 fb_init(struct platform_device *pdev)
 			fb_para.height = fb_para.output_height;
 #endif
 
-			ret = display_fb_request(i, &fb_para);
+			ret = display_fb_request(i, &fb_para, false);
 			if (ret)
 				break;
 #if defined(CONFIG_DISP2_SUNXI_BOOT_COLORBAR)
