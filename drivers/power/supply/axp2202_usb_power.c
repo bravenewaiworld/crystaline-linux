@@ -6,8 +6,8 @@
  * EXTCON_USB while powered by a computer or charger, EXTCON_USB_HOST while a USB device that
  * needs power is attached (from the chip's USB-C detection), and the charger type from the
  * chip's BC1.2 charger detection (EXTCON_CHG_USB_SDP: computer port, CDP: computer port with
- * charging, DCP: wall charger). That detection runs only with the DT's pmu_bc12_en, and the chip
- * then sets the input current limit from it.
+ * charging, DCP: wall charger). BC1.2 detection needs the DT's pmu_bc12_en, USB-C detection
+ * pmu_usb_typec_used; the chip sets the input current limit itself from both.
  *
  * Based on Allwinner's BSP driver (github.com/radxa/allwinner-bsp).
  * Copyright(c) 2020 - 2023 Allwinner Technology Co.,Ltd. All rights reserved.
@@ -199,15 +199,16 @@ static irqreturn_t axp2202_usb_irq(int irq, void *data)
 /*
  * The chip sets the input current limit from its BC1.2 charger detection only on a plug-in, so a
  * cable already connected at boot keeps whatever limit the bootloader set. Re-apply a limit from
- * the stored detection result: 3 A for a wall charger (observed chip behaviour), and the BC1.2
- * values of 500 mA for a computer port and 1.5 A for a charging computer port (not observed).
- * With no result, the bootloader's limit stays. (Our 5 V output is always off at this point, so
- * VBUS is external.)
+ * the stored detection result, as the BC1.2 values: 500 mA for a computer port, 1.5 A for a
+ * charging computer port and for a wall charger. A USB-A wall charger gets 1.5 A from the chip
+ * too; a USB-C charger's higher advertised current (up to 3 A, set by the chip's USB-C
+ * detection on plug-in) is not recovered here, as nothing tells it apart. With no result, the
+ * bootloader's limit stays. (Our 5 V output is always off at this point, so VBUS is external.)
  */
 static void axp2202_usb_boot_limit(struct regmap *regmap)
 {
 	/* in the chip's result order: 1, 2, 3 */
-	static const unsigned int limit_ma[] = { 500, 1500, 3000 };
+	static const unsigned int limit_ma[] = { 500, 1500, 1500 };
 	unsigned int stat, bc;
 
 	if (regmap_read(regmap, AXP2202_COMM_STAT0, &stat) ||
@@ -226,13 +227,15 @@ static void axp2202_usb_init(struct axp2202_usb_power *usb_power,
 			     struct device_node *np)
 {
 	struct regmap *regmap = usb_power->regmap;
-	u32 vindpm_mv, bc12_en, boost_mv;
+	u32 vindpm_mv, bc12_en, typec_used, boost_mv;
 
 	/* VBUS voltage below which the PMIC reduces input current (VINDPM) */
 	if (of_property_read_u32(np, "pmu_usbad_vol", &vindpm_mv))
 		vindpm_mv = 4600;
 	if (of_property_read_u32(np, "pmu_bc12_en", &bc12_en))
 		bc12_en = 0;
+	if (of_property_read_u32(np, "pmu_usb_typec_used", &typec_used))
+		typec_used = 0;
 	if (of_property_read_u32(np, "pmu_boost_vol", &boost_mv))
 		boost_mv = 5126;
 
@@ -254,6 +257,24 @@ static void axp2202_usb_init(struct axp2202_usb_power *usb_power,
 	} else {
 		regmap_update_bits(regmap, AXP2202_CLK_EN, BIT(4), 0);
 		regmap_update_bits(regmap, AXP2202_IIN_LIM, BIT(7), BIT(7));
+	}
+
+	/*
+	 * USB-C detection (the CC pins). A USB-C charger turns on VBUS only once it sees a power
+	 * sink on CC, so with detection off USB-C chargers and PC ports give no power (only USB-A
+	 * ones work) and AXP2202_CC_STAT0 stays 0 (no EXTCON_USB_HOST). With it on, the chip also
+	 * sets the input current limit on plug-in from a USB-C charger's advertised current. The
+	 * bits are undocumented; these are the values Allwinner's BSP driver writes: the CC block's
+	 * clock, bit 5 of the global control (enable), bit 2 cleared, and mode 3 (alternate between
+	 * sink and source). Without the DT property it is switched off, as the BSP does.
+	 */
+	if (typec_used) {
+		regmap_update_bits(regmap, AXP2202_CLK_EN, BIT(3), BIT(3));
+		regmap_update_bits(regmap, AXP2202_CC_GLB_CTRL, BIT(5) | BIT(2), BIT(5));
+		regmap_update_bits(regmap, AXP2202_CC_MODE_CTRL, GENMASK(1, 0), 3);
+	} else {
+		regmap_update_bits(regmap, AXP2202_CLK_EN, BIT(3), 0);
+		regmap_update_bits(regmap, AXP2202_CC_MODE_CTRL, GENMASK(1, 0), 0);
 	}
 
 	/* OTG boost output voltage: 4550 mV + 64 mV steps in bits 7:4 */
