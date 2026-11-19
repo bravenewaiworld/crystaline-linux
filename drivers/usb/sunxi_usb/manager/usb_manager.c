@@ -312,7 +312,8 @@ static __s32 usb_script_parse(struct device_node *np, struct usb_cfg *cfg)
  * OTG port role from cable detection (extcon) instead of polling an ID pin, for boards whose
  * role comes from a USB-C detector: usbc0's "extcon" property names the detector. The port is
  * host while EXTCON_USB_HOST is attached, device while EXTCON_USB is, and off otherwise.
- * The vendor sysfs role files (usb_host, usb_device, usb_null) still work as debug overrides,
+ * The vendor sysfs role files (usb_host, usb_device, usb_null) still work as debug overrides
+ * (reading one switches to that role; only otg_role is safe to read),
  * until the next cable change; a forced host gets no VBUS without a host cable.
  */
 static struct extcon_dev *usb_edev;
