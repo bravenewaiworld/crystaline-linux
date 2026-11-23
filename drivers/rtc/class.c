@@ -64,7 +64,11 @@ static int rtc_suspend(struct device *dev)
 	/* snapshot the current RTC and system time at suspend*/
 	err = rtc_read_time(rtc, &tm);
 	if (err < 0) {
-		pr_debug("%s:  fail to read rtc time\n", dev_name(&rtc->dev));
+		/*
+		 * Harmless: rtc_resume then uses the previous snapshot; the RTC and system time
+		 * have kept step since, so it still gets about this sleep's length.
+		 */
+		pr_warn("%s: suspend: can't read the time: %d\n", dev_name(&rtc->dev), err);
 		return 0;
 	}
 
@@ -91,6 +95,14 @@ static int rtc_suspend(struct device *dev)
 		old_system = timespec64_sub(old_system, delta_delta);
 	}
 
+	/*
+	 * Where deep sleep stops the CPU's timer (device-tree property arm,no-tick-in-suspend),
+	 * the sleep's length comes only from this RTC and is added to both the system time and
+	 * CLOCK_BOOTTIME. This line and its pair in rtc_resume let a wrong time or uptime after
+	 * a wake be traced to the RTC readings. "system" is after the drift adjustment above.
+	 */
+	pr_info("%s: suspend: rtc %lld system %lld\n", dev_name(&rtc->dev),
+		(long long)old_rtc.tv_sec, (long long)old_system.tv_sec);
 	return 0;
 }
 
@@ -113,7 +125,7 @@ static int rtc_resume(struct device *dev)
 	getnstimeofday64(&new_system);
 	err = rtc_read_time(rtc, &tm);
 	if (err < 0) {
-		pr_debug("%s:  fail to read rtc time\n", dev_name(&rtc->dev));
+		pr_warn("%s: resume: can't read the time: %d\n", dev_name(&rtc->dev), err);
 		return 0;
 	}
 
@@ -121,7 +133,8 @@ static int rtc_resume(struct device *dev)
 	new_rtc.tv_nsec = 0;
 
 	if (new_rtc.tv_sec < old_rtc.tv_sec) {
-		pr_debug("%s:  time travel!\n", dev_name(&rtc->dev));
+		pr_warn("%s: resume: rtc %lld is before the suspend's %lld: sleep not added\n",
+			dev_name(&rtc->dev), (long long)new_rtc.tv_sec, (long long)old_rtc.tv_sec);
 		return 0;
 	}
 
@@ -138,6 +151,9 @@ static int rtc_resume(struct device *dev)
 	sleep_time = timespec64_sub(sleep_time,
 			timespec64_sub(new_system, old_system));
 
+	pr_info("%s: resume: rtc %lld system %lld asleep %lld s%s\n", dev_name(&rtc->dev),
+		(long long)new_rtc.tv_sec, (long long)new_system.tv_sec, (long long)sleep_time.tv_sec,
+		sleep_time.tv_sec >= 0 ? "" : " (negative: not added)");
 	if (sleep_time.tv_sec >= 0)
 		timekeeping_inject_sleeptime64(&sleep_time);
 	rtc_hctosys_ret = 0;
