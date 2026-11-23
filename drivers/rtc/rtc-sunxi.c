@@ -163,7 +163,7 @@ static int sunxi_rtc_day_to_ymd(struct rtc_time *rtc_tm, u32 min_year,
 	rtc_tm->tm_year = year - 1900;
 	last_year = rtc_tm->tm_year;
 
-	leap = is_leap_year(rtc_tm->tm_year);
+	leap = is_leap_year(year);
 	for (i = 1; date > month_days[leap][i]; i++)
 		date -= month_days[leap][i];
 	rtc_tm->tm_mon = i;
@@ -365,7 +365,13 @@ static int sunxi_rtc_setalarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	}
 
 	time_gap = diff;
-	time_gap_day = alrm_tm->tm_mday - tm_now.tm_mday;
+	/*
+	 * Whole calendar days from today to the alarm's date (a day-of-month difference would be
+	 * wrong across a month's end). Caveat (simplified timer): the day register is read again
+	 * when the alarm is written; if midnight passes in between, the alarm lands a day late.
+	 */
+	time_gap_day = div_s64(rtc_tm_to_time64(alrm_tm), SEC_IN_DAY) -
+		div_s64(rtc_tm_to_time64(&tm_now), SEC_IN_DAY);
 #ifdef SUNXI_SIMPLIFIED_TIMER
 	sunxi_rtc_setaie(0, chip);
 
