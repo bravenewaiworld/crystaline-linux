@@ -900,8 +900,10 @@ static void axp2202_monitor_work(struct work_struct *work)
 	struct regmap *regmap = bat_power->regmap;
 	unsigned int val;
 
-	power_supply_changed(bat_power->bat_supply);
-
+	/*
+	 * No power_supply_changed() here: the chip's interrupts (axp2202_bat_irq) report the changes
+	 * worth a uevent, and each one makes the power-supply core read every property over I2C.
+	 */
 	/*
 	 * The coulomb counter is signed and normally fits in 16 bits, so its
 	 * high word is 0 or 0xffff; anything else is an overflow and the
